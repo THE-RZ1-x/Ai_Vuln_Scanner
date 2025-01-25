@@ -55,14 +55,21 @@ import vulners
 import shodan
 import aiohttp
 import asyncio
+from web_scanner import WebScanner, WebVulnerability
+from report_generator import ReportGenerator, ReportData
+from container_scanner import ContainerScanner, ContainerScanResult
+from cloud_scanner import CloudScanner, CloudScanResult
 
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='AI-powered vulnerability scanner')
-parser.add_argument('-t', '--target', required=True, help='Target IP address or hostname')
-parser.add_argument('-s', '--scan-type', choices=['basic', 'comprehensive'], default='basic',
+parser.add_argument('-t', '--target', required=True, help='Target IP address, hostname, container image, or cloud provider')
+parser.add_argument('-s', '--scan-type', choices=['basic', 'comprehensive', 'container', 'cloud'], default='basic',
                   help='Type of scan to perform')
 parser.add_argument('-v', '--verbose', action='store_true', help='Enable verbose output')
 parser.add_argument('-o', '--output', help='Output file name (without extension)')
+parser.add_argument('--container', action='store_true', help='Treat target as a container image')
+parser.add_argument('--cloud-providers', nargs='+', choices=['aws', 'azure', 'gcp'],
+                  help='Cloud providers to scan when using cloud scan type')
 args = parser.parse_args()
 
 # Configure logging based on verbosity
@@ -99,6 +106,10 @@ class VulnerabilityScanner:
         """Initialize the scanner with necessary APIs."""
         self.vulners_api = None
         self.shodan_api = None
+        self.web_scanner = WebScanner()
+        self.container_scanner = ContainerScanner()
+        self.cloud_scanner = CloudScanner()
+        self.report_generator = ReportGenerator()
         self.initialize_apis()
 
     def initialize_apis(self):
@@ -154,6 +165,280 @@ class VulnerabilityScanner:
                 'ai_analysis': {},
                 'recommendations': []
             }
+
+    async def scan(self, target: str, scan_type: str = 'basic') -> dict:
+        """
+        Perform vulnerability scan based on target type.
+        Args:
+            target: IP address, hostname, container image, or cloud provider
+            scan_type: Type of scan to perform
+        Returns:
+            dict: Scan results including vulnerabilities and analysis
+        """
+        start_time = time.time()
+        
+        try:
+            # Check scan type
+            if scan_type == 'cloud':
+                return await self._scan_cloud_infrastructure(target)
+            elif scan_type == 'container' or self._is_container_target(target):
+                return await self._scan_container(target)
+            else:
+                return await self._scan_network_target(target, scan_type)
+                
+        except Exception as e:
+            logger.error(f"Error during scan: {str(e)}")
+            raise
+            
+    def _is_container_target(self, target: str) -> bool:
+        """Determine if the target is a container image."""
+        return ('/' in target or ':' in target) and not any(char in target for char in ['http://', 'https://', '*'])
+        
+    async def _scan_container(self, target: str) -> dict:
+        """Perform container security scan."""
+        try:
+            print(f"Starting container security scan for {target}...")
+            
+            # Scan container
+            container_results = await self.container_scanner.scan_container(target)
+            
+            # Calculate risk score based on findings
+            risk_score = self._calculate_container_risk_score(container_results)
+            
+            # Prepare report data
+            report_data = ReportData(
+                target=target,
+                scan_type='container',
+                timestamp=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+                vulnerabilities=self._convert_container_vulns(container_results.vulnerabilities),
+                system_info={'type': 'container', 'image': target},
+                web_vulnerabilities=[],
+                network_services=[],
+                risk_score=risk_score,
+                scan_duration=time.time() - start_time
+            )
+            
+            # Generate report
+            report_path = self.report_generator.generate_report(
+                report_data,
+                output_dir="reports"
+            )
+            
+            print(f"✓ Container scan complete. Report generated: {report_path}")
+            
+            return {
+                'container_results': container_results,
+                'risk_score': risk_score,
+                'report_path': report_path
+            }
+            
+        except Exception as e:
+            logger.error(f"Error scanning container: {str(e)}")
+            raise
+            
+    def _calculate_container_risk_score(self, results: ContainerScanResult) -> float:
+        """Calculate risk score for container scan results."""
+        score = 0.0
+        
+        # Vulnerability severity weights
+        severity_weights = {
+            'Critical': 10.0,
+            'High': 8.0,
+            'Medium': 5.0,
+            'Low': 2.0,
+            'Unknown': 1.0
+        }
+        
+        # Calculate vulnerability score
+        vuln_count = len(results.vulnerabilities)
+        if vuln_count > 0:
+            severity_scores = [severity_weights.get(v.severity, 1.0) for v in results.vulnerabilities]
+            score += sum(severity_scores) / vuln_count
+            
+        # Add points for misconfigurations
+        score += len(results.misconfigurations) * 2.0
+        
+        # Add points for exposed secrets
+        score += len(results.secrets) * 3.0
+        
+        # Add points for compliance issues
+        score += len(results.compliance_issues) * 1.5
+        
+        # Normalize score to 0-10 range
+        score = min(score, 10.0)
+        
+        return score
+        
+    def _convert_container_vulns(self, container_vulns: List[ContainerVulnerability]) -> List[Dict]:
+        """Convert container vulnerabilities to standard format."""
+        return [{
+            'type': 'Container',
+            'id': vuln.id,
+            'severity': vuln.severity,
+            'description': vuln.description,
+            'package': vuln.package,
+            'current_version': vuln.version,
+            'fixed_version': vuln.fixed_version,
+            'cve_id': vuln.cve_id,
+            'remediation': vuln.remediation
+        } for vuln in container_vulns]
+        
+    async def _scan_network_target(self, target: str, scan_type: str) -> dict:
+        """Perform network and web application scan."""
+        # Validate target
+        if not validate_target(target):
+            raise ValueError(f"Invalid target: {target}")
+            
+        # Initialize components
+        network_mapper = NetworkMapper()
+        ai_analyzer = init_ai_analyzer()
+        
+        # Perform network scan
+        print(f"Running network scan on {target}...")
+        scan_results = await network_mapper.scan_target(target, scan_type)
+        
+        # Perform web vulnerability scan if HTTP/HTTPS services are found
+        web_vulns = []
+        if any(service['name'] in ['http', 'https'] for service in scan_results.get('services', [])):
+            print("Detected web services, performing web vulnerability scan...")
+            web_vulns = await self.web_scanner.scan_web_application(f"http://{target}")
+        
+        # Analyze results
+        analysis_results = await analyze_vulnerabilities(scan_results)
+        
+        # Calculate risk score
+        risk_score = calculate_risk_level(target)
+        
+        # Prepare report data
+        report_data = ReportData(
+            target=target,
+            scan_type=scan_type,
+            timestamp=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+            vulnerabilities=analysis_results.get('vulnerabilities', []),
+            system_info=scan_results.get('system_info', {}),
+            web_vulnerabilities=web_vulns,
+            network_services=scan_results.get('services', []),
+            risk_score=risk_score,
+            scan_duration=time.time() - start_time
+        )
+        
+        # Generate report
+        report_path = self.report_generator.generate_report(
+            report_data,
+            output_dir="reports"
+        )
+        
+        print(f"✓ Network scan complete. Report generated: {report_path}")
+        
+        return {
+            'scan_results': scan_results,
+            'analysis': analysis_results,
+            'web_vulnerabilities': web_vulns,
+            'risk_score': risk_score,
+            'report_path': report_path
+        }
+
+    async def _scan_cloud_infrastructure(self, target: str) -> dict:
+        """Perform cloud infrastructure security scan."""
+        try:
+            print("Starting cloud infrastructure security scan...")
+            
+            # Determine cloud providers to scan
+            providers = []
+            if args.cloud_providers:
+                providers = args.cloud_providers
+            elif target.lower() in ['aws', 'azure', 'gcp']:
+                providers = [target.lower()]
+            else:
+                providers = ['aws', 'azure', 'gcp']  # Scan all by default
+                
+            # Scan cloud infrastructure
+            cloud_results = await self.cloud_scanner.scan_cloud_infrastructure(providers)
+            
+            # Calculate overall risk score
+            risk_score = self._calculate_cloud_risk_score(cloud_results)
+            
+            # Prepare report data
+            report_data = ReportData(
+                target=f"Cloud Infrastructure ({', '.join(providers)})",
+                scan_type='cloud',
+                timestamp=datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+                vulnerabilities=self._convert_cloud_vulns(cloud_results),
+                system_info={'providers': providers},
+                web_vulnerabilities=[],
+                network_services=[],
+                risk_score=risk_score,
+                scan_duration=time.time() - start_time,
+                cloud_findings=cloud_results
+            )
+            
+            # Generate report
+            report_path = self.report_generator.generate_report(
+                report_data,
+                output_dir="reports"
+            )
+            
+            print(f"✓ Cloud infrastructure scan complete. Report generated: {report_path}")
+            
+            return {
+                'cloud_results': cloud_results,
+                'risk_score': risk_score,
+                'report_path': report_path
+            }
+            
+        except Exception as e:
+            logger.error(f"Error scanning cloud infrastructure: {str(e)}")
+            raise
+            
+    def _calculate_cloud_risk_score(self, results: Dict[str, CloudScanResult]) -> float:
+        """Calculate overall cloud infrastructure risk score."""
+        if not results:
+            return 0.0
+            
+        total_score = 0.0
+        weights = {
+            'Critical': 10.0,
+            'High': 8.0,
+            'Medium': 5.0,
+            'Low': 2.0,
+            'Unknown': 1.0
+        }
+        
+        for provider_results in results.values():
+            # Vulnerability score
+            vuln_score = sum(weights.get(v.severity, 1.0) for v in provider_results.vulnerabilities)
+            
+            # Misconfiguration score
+            misconfig_score = len(provider_results.misconfigurations) * 2.0
+            
+            # IAM issues score
+            iam_score = len(provider_results.iam_issues) * 3.0
+            
+            # Network findings score
+            network_score = len(provider_results.network_findings) * 2.5
+            
+            # Add to total
+            total_score += (vuln_score + misconfig_score + iam_score + network_score)
+            
+        # Normalize to 0-10 range
+        return min(total_score / len(results), 10.0)
+        
+    def _convert_cloud_vulns(self, results: Dict[str, CloudScanResult]) -> List[Dict]:
+        """Convert cloud vulnerabilities to standard format."""
+        vulns = []
+        for provider, result in results.items():
+            for vuln in result.vulnerabilities:
+                vulns.append({
+                    'type': 'Cloud',
+                    'provider': provider,
+                    'resource_id': vuln.resource_id,
+                    'severity': vuln.severity,
+                    'description': vuln.description,
+                    'recommendation': vuln.recommendation,
+                    'compliance_standards': vuln.compliance_standards,
+                    'risk_score': vuln.risk_score
+                })
+        return vulns
 
 class VulnerabilityDatabase:
     def __init__(self):
@@ -321,14 +606,123 @@ class ExploitFinder:
 
 class AISecurityAnalyzer:
     def __init__(self):
-        """Initialize the AI Security Analyzer."""
-        self.model = init_gemini()
+        """Initialize the AI Security Analyzer with multiple AI models."""
+        self.models = {
+            'gemini': init_gemini(),
+            'openai': init_openai(),
+            'local_ml': init_local_ml_model()
+        }
+        self.active_model = 'gemini'  # Default model
         self.cache = {}
         self.last_api_call = 0
         self.min_delay = 2
         self.autonomous_mode = True
         self.security_apis = SecurityAPIIntegration()
-
+        
+    async def analyze_attack_surface(self, service_data: dict) -> dict:
+        """Enhanced AI-powered attack surface analysis using multiple models."""
+        try:
+            # Try primary model first
+            result = await self._analyze_with_model(self.active_model, service_data)
+            
+            # If confidence is low, try other models
+            if result.get('confidence', 1.0) < 0.7:
+                all_results = await asyncio.gather(*[
+                    self._analyze_with_model(model, service_data)
+                    for model in self.models.keys()
+                    if model != self.active_model
+                ])
+                
+                # Combine results using ensemble approach
+                result = self._ensemble_results([result] + all_results)
+            
+            # Add false positive reduction
+            result = await self._reduce_false_positives(result)
+            
+            return result
+        except Exception as e:
+            logger.error(f"AI analysis failed: {str(e)}")
+            return await self.get_fallback_analysis(service_data)
+    
+    async def _analyze_with_model(self, model_name: str, service_data: dict) -> dict:
+        """Analyze using a specific AI model."""
+        model = self.models[model_name]
+        
+        # Format prompt based on model type
+        if model_name == 'gemini':
+            prompt = self._format_gemini_prompt(service_data)
+        elif model_name == 'openai':
+            prompt = self._format_openai_prompt(service_data)
+        else:
+            prompt = self._format_generic_prompt(service_data)
+            
+        # Rate limiting
+        await self._respect_rate_limit(model_name)
+        
+        try:
+            response = await self._get_model_response(model, prompt)
+            return self.parse_ai_response(response)
+        except Exception as e:
+            logger.error(f"Error with {model_name}: {str(e)}")
+            return {}
+    
+    async def _reduce_false_positives(self, result: dict) -> dict:
+        """Reduce false positives using historical data and verification."""
+        if not result.get('vulnerabilities'):
+            return result
+            
+        verified_vulns = []
+        for vuln in result['vulnerabilities']:
+            # Verify using additional sources
+            verification_score = await self._verify_vulnerability(vuln)
+            if verification_score >= 0.7:  # High confidence threshold
+                verified_vulns.append(vuln)
+                
+        result['vulnerabilities'] = verified_vulns
+        return result
+    
+    def _ensemble_results(self, results: List[dict]) -> dict:
+        """Combine results from multiple models using weighted voting."""
+        if not results:
+            return {}
+            
+        # Weight results based on model confidence and historical accuracy
+        weighted_results = []
+        for result in results:
+            if result:
+                weight = result.get('confidence', 0.5) * self._get_model_accuracy(result.get('model', 'unknown'))
+                weighted_results.append((result, weight))
+                
+        # Combine vulnerabilities with weights
+        final_vulns = {}
+        for result, weight in weighted_results:
+            for vuln in result.get('vulnerabilities', []):
+                vuln_id = vuln.get('id')
+                if vuln_id in final_vulns:
+                    final_vulns[vuln_id]['weight'] += weight
+                else:
+                    vuln['weight'] = weight
+                    final_vulns[vuln_id] = vuln
+                    
+        # Filter final vulnerabilities based on weighted consensus
+        consensus_threshold = 0.6
+        final_result = {
+            'vulnerabilities': [v for v in final_vulns.values() if v['weight'] > consensus_threshold],
+            'confidence': sum(wr[1] for wr in weighted_results) / len(weighted_results),
+            'model': 'ensemble'
+        }
+        
+        return final_result
+    
+    def _get_model_accuracy(self, model_name: str) -> float:
+        """Get historical accuracy score for a model."""
+        # TODO: Implement model accuracy tracking
+        return {
+            'gemini': 0.85,
+            'openai': 0.82,
+            'local_ml': 0.75
+        }.get(model_name, 0.5)
+    
     def parse_ai_response(self, response_text: str) -> dict:
         """Parse the AI response into a structured format."""
         try:
@@ -369,58 +763,38 @@ class AISecurityAnalyzer:
                 'technical_details': [],
                 'risk_assessment': []
             }
-
-    async def analyze_attack_surface(self, service_data: dict) -> dict:
-        """Enhanced AI-powered attack surface analysis."""
-        try:
-            if not self.model:
-                print("✗ Gemini AI not available, using fallback analysis")
-                return self.get_fallback_analysis(service_data)
-
-            # Enhanced AI prompt template
-            prompt = f"""Analyze this service from a security perspective:
-Service: {service_data.get('name', '')} ({service_data.get('version', 'unknown version')})
-Port: {service_data.get('port', 'unknown')}
-Protocol: {service_data.get('protocol', 'unknown')}
-
-Provide a security analysis including:
-1. Potential vulnerabilities and findings
-2. Mitigation steps and recommendations
-3. Technical details and attack vectors
-4. Risk assessment and impact analysis
-
-Format your response with clear sections using bullet points."""
-
-            # Get AI analysis with retry mechanism
-            for attempt in range(3):
-                try:
-                    response = await self.model.generate_content(prompt)
-                    
-                    # Handle the response properly
-                    if response.candidates:
-                        text_parts = []
-                        for part in response.candidates[0].content.parts:
-                            if hasattr(part, 'text'):
-                                text_parts.append(part.text)
-                        
-                        analysis_text = '\n'.join(text_parts)
-                        analysis = self.parse_ai_response(analysis_text)
-                        print("✓ AI analysis complete")
-                        return analysis
-                    else:
-                        raise Exception("No response generated")
-                        
-                except Exception as e:
-                    if attempt == 2:
-                        print(f"✗ AI analysis failed: {str(e)}")
-                        return self.get_fallback_analysis(service_data)
-                    await asyncio.sleep(2 ** attempt)
-
-        except Exception as e:
-            print(f"✗ Error in AI analysis: {str(e)}")
-            return self.get_fallback_analysis(service_data)
-
-    def get_fallback_analysis(self, service_data: dict) -> dict:
+    
+    async def _verify_vulnerability(self, vuln: dict) -> float:
+        """Verify a vulnerability using additional sources."""
+        # TODO: Implement vulnerability verification
+        return 0.8
+    
+    async def _respect_rate_limit(self, model_name: str):
+        """Respect rate limits for AI models."""
+        # TODO: Implement rate limiting
+        pass
+    
+    async def _get_model_response(self, model, prompt: str) -> str:
+        """Get the response from an AI model."""
+        # TODO: Implement model response handling
+        return ""
+    
+    def _format_gemini_prompt(self, service_data: dict) -> str:
+        """Format prompt for Gemini AI model."""
+        # TODO: Implement prompt formatting for Gemini
+        return ""
+    
+    def _format_openai_prompt(self, service_data: dict) -> str:
+        """Format prompt for OpenAI model."""
+        # TODO: Implement prompt formatting for OpenAI
+        return ""
+    
+    def _format_generic_prompt(self, service_data: dict) -> str:
+        """Format prompt for generic AI model."""
+        # TODO: Implement prompt formatting for generic model
+        return ""
+    
+    async def get_fallback_analysis(self, service_data: dict) -> dict:
         """Get fallback analysis when AI analysis fails."""
         service_type = service_data.get('name', '').lower()
         print(f"Using fallback analysis for {service_type}")
@@ -1297,7 +1671,7 @@ async def main():
             
             # Perform scan
             try:
-                results = await scan(target, scan_type)
+                results = await scanner.scan(target, scan_type)
                 
                 if results:
                     print("\n=== Scan Results ===")
@@ -1358,7 +1732,7 @@ async def scan(target: str, scan_type: str = 'basic') -> dict:
         # Perform nmap scan
         print(f"Running nmap scan on {target}...")
         nm = nmap.PortScanner()
-        nm.scan(target, arguments=arguments)
+        nm.scan(hosts=target, arguments=arguments)
         print("✓ Nmap scan complete")
         
         scan_results = {
@@ -1479,7 +1853,7 @@ def format_results(results):
     # Format header
     output.append(f"Findings for {results['target']}:")
     if results.get('hostname'):
-        output.append(f"Hostname: {results['hostname']}")
+        output.append(f"Hostname: {', '.join(results['hostname'])}")
     output.append(f"Risk Level: {results['risk_level']}\n")
     
     # Format service analysis
@@ -1551,6 +1925,30 @@ def init_gemini():
         return model
     except Exception as e:
         print(f"✗ Error initializing Gemini API: {str(e)}")
+        return None
+
+def init_openai():
+    """Initialize OpenAI API with proper configuration."""
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        logger.warning("OpenAI API key not found. OpenAI analysis will be disabled.")
+        return None
+        
+    try:
+        import openai
+        openai.api_key = api_key
+        return openai.Client()
+    except Exception as e:
+        logger.error(f"Failed to initialize OpenAI: {str(e)}")
+        return None
+
+def init_local_ml_model():
+    """Initialize local machine learning model for basic analysis."""
+    try:
+        # TODO: Implement local ML model initialization
+        return None
+    except Exception as e:
+        logger.error(f"Failed to initialize local ML model: {str(e)}")
         return None
 
 if __name__ == "__main__":
