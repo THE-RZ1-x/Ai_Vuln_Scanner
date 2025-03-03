@@ -33,31 +33,11 @@ from requests.exceptions import RequestException
 import re
 import vulners
 import shodan
-from jinja2 import Template
-from dotenv import load_dotenv
-from bs4 import BeautifulSoup
-from typing import Dict, List, Union
-from requests.exceptions import RequestException
-import re
-import requests
-import json
-import time
-import logging
-import ipaddress
-from tqdm import tqdm
-from jinja2 import Template
-from dotenv import load_dotenv
-from bs4 import BeautifulSoup
-from typing import Dict, List, Union
-from requests.exceptions import RequestException
-import re
-import vulners
-import shodan
 import aiohttp
 import asyncio
 from web_scanner import WebScanner, WebVulnerability
 from report_generator import ReportGenerator, ReportData
-from container_scanner import ContainerScanner, ContainerScanResult
+from container_scanner import ContainerScanner, ContainerScanResult, ContainerVulnerability
 from cloud_scanner import CloudScanner, CloudScanResult
 
 # Parse command line arguments
@@ -88,18 +68,30 @@ scanner = None
 ai_analyzer = None
 
 def init_scanner():
-    """Initialize the global scanner instance."""
-    global scanner
-    if scanner is None:
+    """Initialize the vulnerability scanner with all components."""
+    try:
+        # Initialize scanner components
         scanner = VulnerabilityScanner()
-    return scanner
-
-def init_ai_analyzer():
-    """Initialize the global AI analyzer instance."""
-    global ai_analyzer
-    if ai_analyzer is None:
-        ai_analyzer = AISecurityAnalyzer()
-    return ai_analyzer
+        
+        # Initialize APIs
+        scanner.initialize_apis()
+        
+        # Initialize analyzers
+        scanner.ai_analyzer = AISecurityAnalyzer()
+        
+        # Initialize scanners
+        scanner.web_scanner = WebScanner()
+        scanner.container_scanner = ContainerScanner()
+        scanner.cloud_scanner = CloudScanner()
+        
+        # Initialize report generator
+        scanner.report_generator = ReportGenerator()
+        
+        return scanner
+    except Exception as e:
+        logger.error(f"Error initializing scanner: {str(e)}")
+        # Still return a partially initialized scanner to continue with limited functionality
+        return VulnerabilityScanner()
 
 class VulnerabilityScanner:
     def __init__(self):
@@ -118,27 +110,31 @@ class VulnerabilityScanner:
             # Initialize Vulners API
             self.vulners_api = init_vulners_api()
             if self.vulners_api:
-                print("✓ Vulners API initialized")
+                print("+ Vulners API initialized")
+            else:
+                print("! Vulners API not available - using offline vulnerability database")
             
             # Initialize Shodan API if needed
-            shodan_api_key = os.getenv('SHODAN_API_KEY')
-            if shodan_api_key:
-                try:
-                    import shodan
-                    self.shodan_api = shodan.Shodan(shodan_api_key)
-                    print("✓ Shodan API initialized")
-                except Exception as e:
-                    print(f"✗ Error initializing Shodan API: {str(e)}")
+            self.shodan_api = init_shodan_api()
+            if self.shodan_api:
+                print("+ Shodan API initialized")
+            else:
+                print("! Shodan API not available - external reconnaissance will be limited")
                     
         except Exception as e:
-            print(f"✗ Error initializing APIs: {str(e)}")
+            print(f"x Error initializing APIs: {str(e)}")
 
     async def analyze_service(self, service_info: dict) -> dict:
         """Analyze a service and its vulnerabilities."""
         try:
-            # Get AI analysis
+            # Get AI analysis if available
+            ai_analysis = None
             analyzer = init_ai_analyzer()
-            ai_analysis = await analyzer.analyze_attack_surface(service_info)
+            if analyzer:
+                try:
+                    ai_analysis = await analyzer.analyze_service(service_info)
+                except Exception as e:
+                    print(f"x Error analyzing service: {str(e)}")
             
             # Get vulnerability information if Vulners API is available
             vulns = []
@@ -148,48 +144,82 @@ class VulnerabilityScanner:
                         service_info['product'],
                         service_info['version']
                     )
-                    if vulns_result.get('vulnerabilities'):
-                        vulns = vulns_result['vulnerabilities']
+                    
+                    if vulns_result:
+                        for vuln_type in vulns_result:
+                            if vuln_type != 'info' and vulns_result[vuln_type]:
+                                vulns.extend(vulns_result[vuln_type])
                 except Exception as e:
-                    print(f"✗ Error getting vulnerabilities: {str(e)}")
+                    print(f"x Error getting vulnerabilities: {str(e)}")
+            
+            # Get service recommendations using offline analysis
+            recommendations = analyze_service_offline(service_info)
             
             return {
-                'vulnerabilities': vulns,
                 'ai_analysis': ai_analysis,
-                'recommendations': ai_analysis.get('mitigation_steps', []) if ai_analysis else []
+                'vulnerabilities': vulns,
+                'recommendations': recommendations
             }
         except Exception as e:
-            print(f"✗ Error analyzing service: {str(e)}")
+            print(f"x Error analyzing service: {str(e)}")
             return {
+                'ai_analysis': None,
                 'vulnerabilities': [],
-                'ai_analysis': {},
-                'recommendations': []
+                'recommendations': analyze_service_offline(service_info)
             }
 
-    async def scan(self, target: str, scan_type: str = 'basic') -> dict:
+    async def scan(self, target, scan_type='network'):
         """
-        Perform vulnerability scan based on target type.
-        Args:
-            target: IP address, hostname, container image, or cloud provider
-            scan_type: Type of scan to perform
-        Returns:
-            dict: Scan results including vulnerabilities and analysis
-        """
-        start_time = time.time()
+        Perform a vulnerability scan on the target.
         
+        Args:
+            target: The target to scan (IP, hostname, URL, etc.)
+            scan_type: Type of scan to perform (network, web, container, cloud)
+            
+        Returns:
+            dict: Scan results
+        """
         try:
-            # Check scan type
-            if scan_type == 'cloud':
-                return await self._scan_cloud_infrastructure(target)
-            elif scan_type == 'container' or self._is_container_target(target):
-                return await self._scan_container(target)
-            else:
-                return await self._scan_network_target(target, scan_type)
+            print(f"Starting {scan_type} scan of {target}...")
+            
+            # Initialize APIs if not already done
+            if not hasattr(self, 'security_apis') or not self.security_apis.initialized:
+                self.initialize_apis()
                 
+            # Initialize AI analyzer if not already done
+            if not hasattr(self, 'ai_analyzer'):
+                self.ai_analyzer = AISecurityAnalyzer()
+                
+            # Determine scan method based on scan_type
+            if scan_type == 'web':
+                if not hasattr(self, 'web_scanner'):
+                    self.web_scanner = WebScanner()
+                results = await self.web_scanner.scan(target)
+            elif scan_type == 'container':
+                if not hasattr(self, 'container_scanner'):
+                    self.container_scanner = ContainerScanner()
+                results = await self.container_scanner.scan(target)
+            elif scan_type == 'cloud':
+                if not hasattr(self, 'cloud_scanner'):
+                    self.cloud_scanner = CloudScanner()
+                results = await self.cloud_scanner.scan(target)
+            else:  # Default to network scan
+                results = await self._scan_network(target)
+                
+            # Generate report
+            if hasattr(self, 'report_generator'):
+                results['report'] = self.report_generator.generate_report(results)
+                
+            return results
         except Exception as e:
             logger.error(f"Error during scan: {str(e)}")
-            raise
-            
+            # Return partial results if available
+            return {
+                'error': str(e),
+                'status': 'failed',
+                'partial_results': getattr(self, '_partial_results', {})
+            }
+
     def _is_container_target(self, target: str) -> bool:
         """Determine if the target is a container image."""
         return ('/' in target or ':' in target) and not any(char in target for char in ['http://', 'https://', '*'])
@@ -224,7 +254,7 @@ class VulnerabilityScanner:
                 output_dir="reports"
             )
             
-            print(f"✓ Container scan complete. Report generated: {report_path}")
+            print(f"+ Container scan complete. Report generated: {report_path}")
             
             return {
                 'container_results': container_results,
@@ -307,7 +337,7 @@ class VulnerabilityScanner:
         analysis_results = await analyze_vulnerabilities(scan_results)
         
         # Calculate risk score
-        risk_score = calculate_risk_level(target)
+        risk_level = self._assess_risk(scan_results.get('services', []))
         
         # Prepare report data
         report_data = ReportData(
@@ -318,7 +348,7 @@ class VulnerabilityScanner:
             system_info=scan_results.get('system_info', {}),
             web_vulnerabilities=web_vulns,
             network_services=scan_results.get('services', []),
-            risk_score=risk_score,
+            risk_score=risk_level,
             scan_duration=time.time() - start_time
         )
         
@@ -328,13 +358,13 @@ class VulnerabilityScanner:
             output_dir="reports"
         )
         
-        print(f"✓ Network scan complete. Report generated: {report_path}")
+        print(f"+ Network scan complete. Report generated: {report_path}")
         
         return {
             'scan_results': scan_results,
             'analysis': analysis_results,
             'web_vulnerabilities': web_vulns,
-            'risk_score': risk_score,
+            'risk_score': risk_level,
             'report_path': report_path
         }
 
@@ -378,7 +408,7 @@ class VulnerabilityScanner:
                 output_dir="reports"
             )
             
-            print(f"✓ Cloud infrastructure scan complete. Report generated: {report_path}")
+            print(f"+ Cloud infrastructure scan complete. Report generated: {report_path}")
             
             return {
                 'cloud_results': cloud_results,
@@ -439,6 +469,408 @@ class VulnerabilityScanner:
                     'risk_score': vuln.risk_score
                 })
         return vulns
+
+    async def _scan_network(self, target):
+        """
+        Perform a network vulnerability scan.
+        
+        Args:
+            target: IP address or hostname to scan
+            
+        Returns:
+            dict: Scan results
+        """
+        try:
+            # Store partial results in case of failure
+            self._partial_results = {
+                'target': target,
+                'scan_type': 'network',
+                'status': 'in_progress',
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            # Validate target
+            if not validate_target(target):
+                logger.error(f"Invalid target: {target}")
+                return {
+                    'error': f"Invalid target: {target}",
+                    'status': 'failed'
+                }
+                
+            # Resolve hostname to IP if needed
+            ip = target
+            if not is_ip_address(target):
+                try:
+                    ip = socket.gethostbyname(target)
+                    print(f"Resolved {target} to {ip}")
+                except socket.gaierror:
+                    logger.error(f"Could not resolve hostname: {target}")
+                    return {
+                        'error': f"Could not resolve hostname: {target}",
+                        'status': 'failed'
+                    }
+            
+            # Get hostnames for the IP
+            hostnames = get_hostnames(ip)
+            self._partial_results['hostnames'] = hostnames
+            
+            # Perform port scan
+            print(f"Scanning ports on {ip}...")
+            ports = await self._scan_ports(ip)
+            if not ports:
+                print("No open ports found")
+                
+            # Analyze services on open ports
+            services = {}
+            for port, protocol in ports.items():
+                service_info = await self._analyze_service(ip, port, protocol)
+                if service_info:
+                    services[f"{port}/{protocol}"] = service_info
+                    
+            self._partial_results['services'] = services
+            
+            # Perform external reconnaissance if available
+            external_info = {}
+            if hasattr(self, 'security_apis') and hasattr(self.security_apis, 'shodan_api') and self.security_apis.shodan_api:
+                try:
+                    print("Performing external reconnaissance...")
+                    external_info = await self.security_apis.shodan_lookup(ip)
+                except Exception as e:
+                    logger.warning(f"Error during external reconnaissance: {str(e)}")
+                    
+            # Assess overall risk
+            risk_level = self._assess_risk(services)
+            
+            # Compile final results
+            results = {
+                'target': target,
+                'ip': ip,
+                'hostnames': hostnames,
+                'scan_type': 'network',
+                'timestamp': datetime.now().isoformat(),
+                'services': services,
+                'external_info': external_info,
+                'risk_level': risk_level,
+                'status': 'completed'
+            }
+            
+            return results
+            
+        except Exception as e:
+            logger.error(f"Error during network scan: {str(e)}")
+            # Return partial results if available
+            return {
+                'error': str(e),
+                'status': 'failed',
+                'partial_results': self._partial_results
+            }
+
+    async def _scan_ports(self, ip):
+        """
+        Scan for open ports on the target IP.
+        
+        Args:
+            ip: IP address to scan
+            
+        Returns:
+            dict: Dictionary of open ports and protocols
+        """
+        try:
+            print(f"Scanning ports on {ip}...")
+            
+            # Use python-nmap for port scanning
+            try:
+                import nmap
+                scanner = nmap.PortScanner(nmap_search_path=('C:\\Program Files (x86)\\Nmap',))
+            except ImportError:
+                logger.warning("python-nmap not installed. Using simplified port scan.")
+                return await self._simple_port_scan(ip)
+                
+            try:
+                # Scan common ports first
+                scanner.scan(ip, '21-25,80,443,3306,3389,8080,8443', arguments='-T4')
+                
+                # Get results
+                open_ports = {}
+                for host in scanner.all_hosts():
+                    for proto in scanner[host].all_protocols():
+                        for port in scanner[host][proto].keys():
+                            if scanner[host][proto][port]['state'] == 'open':
+                                open_ports[port] = proto
+                                
+                return open_ports
+            except Exception as e:
+                logger.warning(f"Error during nmap scan: {str(e)}. Using simplified port scan.")
+                return await self._simple_port_scan(ip)
+                
+        except Exception as e:
+            logger.error(f"Error scanning ports: {str(e)}")
+            return {}
+            
+    async def _simple_port_scan(self, ip):
+        """Simple port scanner using sockets when nmap is not available."""
+        common_ports = [21, 22, 23, 25, 80, 443, 3306, 3389, 8080, 8443]
+        open_ports = {}
+        
+        for port in common_ports:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1)
+                result = sock.connect_ex((ip, port))
+                if result == 0:
+                    open_ports[port] = 'tcp'
+                sock.close()
+            except:
+                pass
+                
+        return open_ports
+            
+    async def _analyze_service(self, ip, port, protocol):
+        """
+        Analyze a service running on a specific port.
+        
+        Args:
+            ip: IP address
+            port: Port number
+            protocol: Protocol (tcp/udp)
+            
+        Returns:
+            dict: Service information and vulnerabilities
+        """
+        try:
+            print(f"Analyzing service on {ip}:{port}/{protocol}...")
+            
+            # Get service information
+            service_info = await self._identify_service(ip, port, protocol)
+            if not service_info:
+                return None
+                
+            # Look up vulnerabilities if product and version are identified
+            vulnerabilities = []
+            if service_info.get('product') and service_info.get('version'):
+                if hasattr(self, 'security_apis'):
+                    try:
+                        vulnerabilities = await self.security_apis.lookup_vulnerabilities(
+                            product=service_info.get('product'),
+                            version=service_info.get('version')
+                        )
+                    except Exception as e:
+                        logger.warning(f"Error looking up vulnerabilities: {str(e)}")
+            
+            # AI analysis of the service
+            analysis = {}
+            if hasattr(self, 'ai_analyzer'):
+                try:
+                    analysis = await self.ai_analyzer.analyze_attack_surface({
+                        'ip': ip,
+                        'port': port,
+                        'protocol': protocol,
+                        'service': service_info.get('name', ''),
+                        'product': service_info.get('product', ''),
+                        'version': service_info.get('version', ''),
+                        'banner': service_info.get('banner', '')
+                    })
+                except Exception as e:
+                    logger.warning(f"Error during AI analysis: {str(e)}")
+                    
+            # Combine results
+            result = {
+                'port': port,
+                'protocol': protocol,
+                'name': service_info.get('name', 'unknown'),
+                'product': service_info.get('product', ''),
+                'version': service_info.get('version', ''),
+                'banner': service_info.get('banner', ''),
+                'vulnerabilities': vulnerabilities,
+                'analysis': analysis
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error analyzing service on {ip}:{port}: {str(e)}")
+            return {
+                'port': port,
+                'protocol': protocol,
+                'name': 'unknown',
+                'error': str(e)
+            }
+            
+    async def _identify_service(self, ip, port, protocol):
+        """
+        Identify service details using banner grabbing.
+        
+        Args:
+            ip: IP address
+            port: Port number
+            protocol: Protocol (tcp/udp)
+            
+        Returns:
+            dict: Service information
+        """
+        # Common service mapping
+        common_services = {
+            21: {'name': 'ftp', 'product': 'Generic FTP'},
+            22: {'name': 'ssh', 'product': 'OpenSSH'},
+            23: {'name': 'telnet', 'product': 'Telnet'},
+            25: {'name': 'smtp', 'product': 'SMTP'},
+            80: {'name': 'http', 'product': 'HTTP Server'},
+            443: {'name': 'https', 'product': 'HTTPS Server'},
+            3306: {'name': 'mysql', 'product': 'MySQL'},
+            3389: {'name': 'rdp', 'product': 'Remote Desktop'},
+            8080: {'name': 'http-alt', 'product': 'HTTP Alternate'},
+            8443: {'name': 'https-alt', 'product': 'HTTPS Alternate'}
+        }
+        
+        # Start with default service info
+        service_info = common_services.get(port, {'name': 'unknown', 'product': 'Unknown'})
+        
+        # Try to get banner
+        banner = await self._grab_banner(ip, port)
+        if banner:
+            service_info['banner'] = banner
+            
+            # Try to identify product and version from banner
+            if 'SSH' in banner and 'OpenSSH' in banner:
+                service_info['product'] = 'OpenSSH'
+                version_match = re.search(r'OpenSSH[_-](\d+\.\d+\w*)', banner)
+                if version_match:
+                    service_info['version'] = version_match.group(1)
+            elif 'HTTP' in banner:
+                server_match = re.search(r'Server: ([^\r\n]+)', banner)
+                if server_match:
+                    server = server_match.group(1)
+                    if 'Apache' in server:
+                        service_info['product'] = 'Apache'
+                        version_match = re.search(r'Apache/(\d+\.\d+\.\d+)', server)
+                        if version_match:
+                            service_info['version'] = version_match.group(1)
+                    elif 'nginx' in server:
+                        service_info['product'] = 'Nginx'
+                        version_match = re.search(r'nginx/(\d+\.\d+\.\d+)', server)
+                        if version_match:
+                            service_info['version'] = version_match.group(1)
+                    else:
+                        service_info['product'] = server
+            
+        return service_info
+        
+    async def _grab_banner(self, ip, port):
+        """
+        Grab service banner from the specified port.
+        
+        Args:
+            ip: IP address
+            port: Port number
+            
+        Returns:
+            str: Service banner or empty string if not available
+        """
+        try:
+            # Different methods based on port
+            if port == 80:
+                return await self._http_banner(ip, port, secure=False)
+            elif port == 443:
+                return await self._http_banner(ip, port, secure=True)
+            elif port == 22:
+                return await self._ssh_banner(ip, port)
+            else:
+                # Generic banner grabbing
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2)
+                sock.connect((ip, port))
+                sock.send(b'\r\n\r\n')
+                banner = sock.recv(1024)
+                sock.close()
+                return banner.decode('utf-8', errors='ignore')
+        except Exception as e:
+            logger.debug(f"Error grabbing banner from {ip}:{port}: {str(e)}")
+            return ""
+            
+    async def _http_banner(self, ip, port, secure=False):
+        """Get HTTP server banner."""
+        try:
+            protocol = 'https' if secure else 'http'
+            url = f"{protocol}://{ip}:{port}"
+            
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers, timeout=5, ssl=False) as response:
+                    return f"HTTP/{response.version.major}.{response.version.minor} {response.status} {response.reason}\r\nServer: {response.headers.get('Server', 'Unknown')}"
+        except Exception as e:
+            logger.debug(f"Error getting HTTP banner: {str(e)}")
+            return ""
+            
+    async def _ssh_banner(self, ip, port):
+        """Get SSH server banner."""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect((ip, port))
+            banner = sock.recv(1024)
+            sock.close()
+            return banner.decode('utf-8', errors='ignore')
+        except Exception as e:
+            logger.debug(f"Error getting SSH banner: {str(e)}")
+            return ""
+            
+    def _assess_risk(self, services):
+        """
+        Assess the overall risk level based on discovered services and vulnerabilities.
+        
+        Args:
+            services: Dictionary of discovered services
+            
+        Returns:
+            str: Risk level (Critical, High, Medium, Low, or Minimal)
+        """
+        try:
+            if not services:
+                return "Minimal"
+                
+            # Count vulnerabilities by severity
+            vuln_counts = {
+                "Critical": 0,
+                "High": 0,
+                "Medium": 0,
+                "Low": 0
+            }
+            
+            # High-risk services
+            high_risk_services = ['ftp', 'telnet', 'rsh', 'rlogin', 'rexec', 'tftp']
+            high_risk_count = 0
+            
+            # Analyze each service
+            for service_id, service in services.items():
+                # Count vulnerabilities by severity
+                for vuln in service.get('vulnerabilities', []):
+                    severity = vuln.get('severity', '').capitalize()
+                    if severity in vuln_counts:
+                        vuln_counts[severity] += 1
+                
+                # Check for high-risk services
+                service_name = service.get('name', '').lower()
+                if service_name in high_risk_services:
+                    high_risk_count += 1
+            
+            # Determine risk level based on vulnerability counts
+            if vuln_counts["Critical"] > 0:
+                return "Critical"
+            elif vuln_counts["High"] > 2 or high_risk_count >= 2:
+                return "High"
+            elif vuln_counts["High"] > 0 or vuln_counts["Medium"] > 3 or high_risk_count > 0:
+                return "Medium"
+            elif vuln_counts["Medium"] > 0 or vuln_counts["Low"] > 5:
+                return "Low"
+            else:
+                return "Minimal"
+                
+        except Exception as e:
+            logger.error(f"Error assessing risk: {str(e)}")
+            return "Unknown"
 
 class VulnerabilityDatabase:
     def __init__(self):
@@ -605,232 +1037,198 @@ class ExploitFinder:
             return exploits
 
 class AISecurityAnalyzer:
+    """AI-powered security analysis for vulnerability assessment."""
+    
     def __init__(self):
-        """Initialize the AI Security Analyzer with multiple AI models."""
-        self.models = {
-            'gemini': init_gemini(),
-            'openai': init_openai(),
-            'local_ml': init_local_ml_model()
-        }
-        self.active_model = 'gemini'  # Default model
-        self.cache = {}
-        self.last_api_call = 0
-        self.min_delay = 2
-        self.autonomous_mode = True
-        self.security_apis = SecurityAPIIntegration()
+        """Initialize AI models for security analysis."""
+        self.gemini_model = init_gemini()
+        self.openai_model = init_openai()
+        self.local_model = init_local_ml_model()
+        self.available_models = []
         
-    async def analyze_attack_surface(self, service_data: dict) -> dict:
-        """Enhanced AI-powered attack surface analysis using multiple models."""
-        try:
-            # Try primary model first
-            result = await self._analyze_with_model(self.active_model, service_data)
+        if self.gemini_model:
+            self.available_models.append("gemini")
+        if self.openai_model:
+            self.available_models.append("openai")
+        if self.local_model:
+            self.available_models.append("local")
             
-            # If confidence is low, try other models
-            if result.get('confidence', 1.0) < 0.7:
-                all_results = await asyncio.gather(*[
-                    self._analyze_with_model(model, service_data)
-                    for model in self.models.keys()
-                    if model != self.active_model
-                ])
-                
-                # Combine results using ensemble approach
-                result = self._ensemble_results([result] + all_results)
-            
-            # Add false positive reduction
-            result = await self._reduce_false_positives(result)
-            
-            return result
-        except Exception as e:
-            logger.error(f"AI analysis failed: {str(e)}")
-            return await self.get_fallback_analysis(service_data)
-    
-    async def _analyze_with_model(self, model_name: str, service_data: dict) -> dict:
-        """Analyze using a specific AI model."""
-        model = self.models[model_name]
-        
-        # Format prompt based on model type
-        if model_name == 'gemini':
-            prompt = self._format_gemini_prompt(service_data)
-        elif model_name == 'openai':
-            prompt = self._format_openai_prompt(service_data)
+        if not self.available_models:
+            logger.warning("No AI models available. Using offline analysis only.")
         else:
-            prompt = self._format_generic_prompt(service_data)
-            
-        # Rate limiting
-        await self._respect_rate_limit(model_name)
+            logger.info(f"AI Security Analyzer initialized with models: {', '.join(self.available_models)}")
+    
+    async def analyze_service(self, service_data):
+        """
+        Analyze a service using available AI models.
         
+        Args:
+            service_data: Dictionary containing service information
+            
+        Returns:
+            dict: Analysis results
+        """
         try:
-            response = await self._get_model_response(model, prompt)
-            return self.parse_ai_response(response)
-        except Exception as e:
-            logger.error(f"Error with {model_name}: {str(e)}")
-            return {}
-    
-    async def _reduce_false_positives(self, result: dict) -> dict:
-        """Reduce false positives using historical data and verification."""
-        if not result.get('vulnerabilities'):
-            return result
+            # If no AI models are available, use offline analysis
+            if not self.available_models:
+                logger.info("Using offline analysis for service")
+                return analyze_service_offline(service_data)
             
-        verified_vulns = []
-        for vuln in result['vulnerabilities']:
-            # Verify using additional sources
-            verification_score = await self._verify_vulnerability(vuln)
-            if verification_score >= 0.7:  # High confidence threshold
-                verified_vulns.append(vuln)
-                
-        result['vulnerabilities'] = verified_vulns
-        return result
-    
-    def _ensemble_results(self, results: List[dict]) -> dict:
-        """Combine results from multiple models using weighted voting."""
-        if not results:
-            return {}
+            # Prepare service information for analysis
+            service_name = service_data.get('name', '')
+            product = service_data.get('product', '')
+            version = service_data.get('version', '')
+            port = service_data.get('port', '')
             
-        # Weight results based on model confidence and historical accuracy
-        weighted_results = []
-        for result in results:
-            if result:
-                weight = result.get('confidence', 0.5) * self._get_model_accuracy(result.get('model', 'unknown'))
-                weighted_results.append((result, weight))
-                
-        # Combine vulnerabilities with weights
-        final_vulns = {}
-        for result, weight in weighted_results:
-            for vuln in result.get('vulnerabilities', []):
-                vuln_id = vuln.get('id')
-                if vuln_id in final_vulns:
-                    final_vulns[vuln_id]['weight'] += weight
-                else:
-                    vuln['weight'] = weight
-                    final_vulns[vuln_id] = vuln
-                    
-        # Filter final vulnerabilities based on weighted consensus
-        consensus_threshold = 0.6
-        final_result = {
-            'vulnerabilities': [v for v in final_vulns.values() if v['weight'] > consensus_threshold],
-            'confidence': sum(wr[1] for wr in weighted_results) / len(weighted_results),
-            'model': 'ensemble'
-        }
-        
-        return final_result
-    
-    def _get_model_accuracy(self, model_name: str) -> float:
-        """Get historical accuracy score for a model."""
-        # TODO: Implement model accuracy tracking
-        return {
-            'gemini': 0.85,
-            'openai': 0.82,
-            'local_ml': 0.75
-        }.get(model_name, 0.5)
-    
-    def parse_ai_response(self, response_text: str) -> dict:
-        """Parse the AI response into a structured format."""
-        try:
-            # Split response into sections
-            sections = response_text.split('\n\n')
-            analysis = {
-                'findings': [],
-                'mitigation_steps': [],
-                'technical_details': [],
-                'risk_assessment': []
-            }
+            prompt = f"""
+            Analyze the security of this network service:
+            Service: {service_name}
+            Product: {product}
+            Version: {version}
+            Port: {port}
             
-            current_section = None
-            for line in response_text.split('\n'):
-                line = line.strip()
-                if not line:
+            Provide a detailed security analysis in JSON format with these fields:
+            1. vulnerabilities: Array of potential vulnerabilities (each with id, title, severity, description)
+            2. recommendations: Array of security recommendations
+            3. details: Array of important details about the service
+            4. risk: Array of risk factors
+            
+            Format the response as valid JSON.
+            """
+            
+            # Try available models in order of preference
+            for model_name in self.available_models:
+                try:
+                    if model_name == "gemini" and self.gemini_model:
+                        response = await self._get_gemini_analysis(prompt)
+                    elif model_name == "openai" and self.openai_model:
+                        response = await self._get_openai_analysis(prompt)
+                    elif model_name == "local" and self.local_model:
+                        response = self._get_local_analysis(service_data)
+                    else:
+                        continue
+                        
+                    if response:
+                        # Try to parse JSON response
+                        try:
+                            # Extract JSON from response if needed
+                            json_str = self._extract_json(response)
+                            analysis = json.loads(json_str)
+                            logger.info(f"Successfully analyzed service using {model_name} model")
+                            return analysis
+                        except json.JSONDecodeError:
+                            logger.warning(f"Failed to parse JSON from {model_name} response")
+                            continue
+                except Exception as e:
+                    logger.warning(f"Error using {model_name} model: {str(e)}")
                     continue
-                
-                # Identify sections
-                if 'vulnerability' in line.lower() or 'finding' in line.lower():
-                    current_section = 'findings'
-                elif 'mitigation' in line.lower() or 'recommendation' in line.lower():
-                    current_section = 'mitigation_steps'
-                elif 'technical' in line.lower() or 'detail' in line.lower():
-                    current_section = 'technical_details'
-                elif 'risk' in line.lower() or 'impact' in line.lower():
-                    current_section = 'risk_assessment'
-                elif current_section and line.startswith(('-', '*', '•')):
-                    analysis[current_section].append(line.lstrip('-* •').strip())
             
-            return analysis
+            # If all AI models fail, fall back to offline analysis
+            logger.warning("All AI models failed. Using offline analysis.")
+            return analyze_service_offline(service_data)
             
         except Exception as e:
-            print(f"✗ Error parsing AI response: {str(e)}")
-            return {
-                'findings': [],
-                'mitigation_steps': [],
-                'technical_details': [],
-                'risk_assessment': []
-            }
+            logger.error(f"Error in AI analysis: {str(e)}")
+            return analyze_service_offline(service_data)
     
-    async def _verify_vulnerability(self, vuln: dict) -> float:
-        """Verify a vulnerability using additional sources."""
-        # TODO: Implement vulnerability verification
-        return 0.8
+    async def _get_gemini_analysis(self, prompt):
+        """Get analysis from Gemini model."""
+        try:
+            if not self.gemini_model:
+                return None
+                
+            response = self.gemini_model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            logger.warning(f"Gemini analysis error: {str(e)}")
+            return None
     
-    async def _respect_rate_limit(self, model_name: str):
-        """Respect rate limits for AI models."""
-        # TODO: Implement rate limiting
-        pass
+    async def _get_openai_analysis(self, prompt):
+        """Get analysis from OpenAI model."""
+        try:
+            if not self.openai_model:
+                return None
+                
+            response = await self.openai_model.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "system", "content": "You are a cybersecurity expert analyzing network services for vulnerabilities."},
+                          {"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.warning(f"OpenAI analysis error: {str(e)}")
+            return None
     
-    async def _get_model_response(self, model, prompt: str) -> str:
-        """Get the response from an AI model."""
-        # TODO: Implement model response handling
-        return ""
+    def _get_local_analysis(self, service_data):
+        """Get analysis from local ML model."""
+        try:
+            if not self.local_model:
+                return None
+                
+            # Convert service data to features
+            features = self._prepare_features(service_data)
+            
+            # Get prediction from model
+            prediction = self.local_model.predict([features])[0]
+            
+            # Convert prediction to analysis format
+            return self._format_local_prediction(prediction, service_data)
+        except Exception as e:
+            logger.warning(f"Local model analysis error: {str(e)}")
+            return None
     
-    def _format_gemini_prompt(self, service_data: dict) -> str:
-        """Format prompt for Gemini AI model."""
-        # TODO: Implement prompt formatting for Gemini
-        return ""
+    def _prepare_features(self, service_data):
+        """Prepare features for local ML model."""
+        # This is a placeholder - actual implementation would depend on the model
+        return [
+            service_data.get('port', 0),
+            hash(service_data.get('name', '')) % 100,
+            hash(service_data.get('product', '')) % 100,
+            hash(service_data.get('version', '')) % 100
+        ]
     
-    def _format_openai_prompt(self, service_data: dict) -> str:
-        """Format prompt for OpenAI model."""
-        # TODO: Implement prompt formatting for OpenAI
-        return ""
-    
-    def _format_generic_prompt(self, service_data: dict) -> str:
-        """Format prompt for generic AI model."""
-        # TODO: Implement prompt formatting for generic model
-        return ""
-    
-    async def get_fallback_analysis(self, service_data: dict) -> dict:
-        """Get fallback analysis when AI analysis fails."""
-        service_type = service_data.get('name', '').lower()
-        print(f"Using fallback analysis for {service_type}")
-        
-        # Get default recommendations based on service type
-        if 'http' in service_type:
-            recommendations = [
-                "Enable HTTPS and redirect HTTP to HTTPS",
-                "Implement security headers (HSTS, CSP, etc.)",
-                "Use WAF for additional protection",
-                "Regular security patching",
-                "Enable logging and monitoring"
-            ]
-        elif 'ssh' in service_type:
-            recommendations = [
-                "Use strong SSH key authentication",
-                "Disable password authentication",
-                "Change default port",
-                "Implement fail2ban",
-                "Regular security updates"
-            ]
-        else:
-            recommendations = [
-                "Keep service updated",
-                "Implement access controls",
-                "Enable logging",
-                "Regular security audits",
-                "Monitor for suspicious activity"
-            ]
-        
+    def _format_local_prediction(self, prediction, service_data):
+        """Format local model prediction as analysis result."""
+        # This is a placeholder - actual implementation would depend on the model
         return {
-            'findings': [f"Service {service_type} may have security vulnerabilities"],
-            'mitigation_steps': recommendations,
-            'technical_details': [],
-            'risk_assessment': ['Potential security risk - manual assessment recommended']
+            'vulnerabilities': [
+                {
+                    'id': 'LOCAL-PRED-01',
+                    'title': f"Potential vulnerability in {service_data.get('name', 'unknown service')}",
+                    'severity': 'Medium',
+                    'description': 'Vulnerability detected by local ML model based on service signature.'
+                }
+            ],
+            'recommendations': [
+                'Update service to latest version',
+                'Apply security patches',
+                'Restrict access to authorized users'
+            ],
+            'details': [
+                f"Service: {service_data.get('name', 'unknown')}",
+                f"Product: {service_data.get('product', 'unknown')} {service_data.get('version', '')}"
+            ],
+            'risk': [
+                'Service may be vulnerable to known exploits',
+                'Consider additional hardening measures'
+            ]
         }
+    
+    def _extract_json(self, text):
+        """Extract JSON from text response."""
+        # Look for JSON in code blocks
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        if json_match:
+            return json_match.group(1)
+            
+        # Look for JSON with curly braces
+        json_match = re.search(r'(\{[\s\S]*\})', text)
+        if json_match:
+            return json_match.group(1)
+            
+        # If no JSON found, return the original text
+        return text
 
 class SecurityAPIIntegration:
     """Integration with various security APIs"""
@@ -938,6 +1336,82 @@ class SecurityAPIIntegration:
             logger.error(f"Error submitting to URLScan: {str(e)}")
             return None
 
+    async def lookup_vulnerabilities(self, product: str, version: str) -> list:
+        """Lookup vulnerabilities for a product and version."""
+        try:
+            # Try Vulners API first
+            if self.vulners_api:
+                try:
+                    vulners_results = self.vulners_api.softwareVulnerabilities(
+                        product,
+                        version
+                    )
+                    if vulners_results.get('vulnerabilities'):
+                        return vulners_results['vulnerabilities']
+                except Exception as e:
+                    logger.error(f"Error getting vulnerabilities: {str(e)}")
+            
+            # Try NVD API as backup
+            try:
+                params = {
+                    'keywordSearch': product,
+                    'resultsPerPage': 100
+                }
+                if version:
+                    params['versionStart'] = version
+                    params['versionStartType'] = 'including'
+
+                headers = {'apiKey': self.nvd_api_key} if self.nvd_api_key else {}
+                
+                response = requests.get(
+                    self.base_url,
+                    params=params,
+                    headers=headers,
+                    timeout=10
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    vulns = []
+                    for vuln in data.get('vulnerabilities', []):
+                        cve = vuln.get('cve', {})
+                        vuln_info = {
+                            'id': cve.get('id'),
+                            'description': cve.get('descriptions', [{}])[0].get('value', ''),
+                            'severity': cve.get('metrics', {}).get('cvssMetricV31', [{}])[0].get('cvssData', {}).get('baseScore', 0),
+                            'published': cve.get('published'),
+                            'references': [ref.get('url') for ref in cve.get('references', [])],
+                            'source': 'nvd'
+                        }
+                        vulns.append(vuln_info)
+                    return vulns
+            except Exception as e:
+                logger.error(f"Error searching NVD: {str(e)}")
+            
+            # Add Shodan data if available
+            try:
+                if self.shodan_api:
+                    api = self.shodan_api
+                    results = api.search(f"product:{product}")
+                    vulns = []
+                    for result in results['matches'][:5]:
+                        if 'vulns' in result:
+                            for cve_id, vuln_info in result['vulns'].items():
+                                vulns.append({
+                                    'id': cve_id,
+                                    'severity': float(vuln_info.get('cvss', 0)),
+                                    'description': vuln_info.get('summary', ''),
+                                    'source': 'shodan'
+                                })
+                    return vulns
+            except Exception as e:
+                logger.error(f"Error searching Shodan: {str(e)}")
+            
+            return []
+        except Exception as e:
+            logger.error(f"Error looking up vulnerabilities: {str(e)}")
+            return []
+
 class NetworkMapper:
     def __init__(self):
         self.vuln_db = VulnerabilityDatabase()
@@ -991,13 +1465,42 @@ class NetworkMapper:
         if service.get('version'):
             recommendations.append(f"Update {service.get('product')} to the latest version")
         
-        # Vulnerability-specific recommendations
-        for vuln in service_analysis['high_risk']:
-            recommendations.append(f"Critical: Patch {vuln['id']} - {vuln['description'][:100]}...")
+        # Port-specific recommendations
+        port = service.get('port', 0)
+        if port < 1024:
+            recommendations.append(f"Service running on privileged port {port}. Consider running as non-root if possible.")
         
+        # Protocol recommendations
+        if service.get('protocol') == 'tcp':
+            recommendations.append("Ensure firewall rules restrict access to necessary IPs only")
+        
+        # SSL/TLS checks
+        if 'http' in service.get('name', '') or 'https' in service.get('name', ''):
+            recommendations.extend([
+                "Verify SSL/TLS configuration and certificate validity",
+                "Enable HTTP Strict Transport Security (HSTS)",
+                "Implement proper Content Security Policy (CSP)"
+            ])
+        
+        # Database recommendations
+        if any(db in service.get('name', '') for db in ['mysql', 'postgresql', 'mongodb', 'redis']):
+            recommendations.extend([
+                "Ensure strong authentication is enabled",
+                "Regularly backup database content",
+                "Monitor for unusual access patterns"
+            ])
+        
+        # Remote access recommendations
+        if any(remote in service.get('name', '') for remote in ['ssh', 'rdp', 'vnc']):
+            recommendations.extend([
+                "Use strong authentication methods",
+                "Implement fail2ban or similar brute-force protection",
+                "Restrict access to specific IP ranges"
+            ])
+    
         return recommendations
 
-def analyze_vulnerabilities(scan_data: dict) -> str:
+async def analyze_vulnerabilities(scan_data: dict) -> str:
     """Analyze scan data for vulnerabilities."""
     try:
         analysis_results = []
@@ -1049,10 +1552,9 @@ Provide a detailed security analysis."""
                             analysis_results.append(f"- {rec}")
 
         return "\n".join(analysis_results)
-
     except Exception as e:
-        logger.error(f"Error during vulnerability analysis: {str(e)}")
-        return f"Error analyzing vulnerabilities: {str(e)}"
+        logger.error(f"Vulnerability analysis failed: {str(e)}")
+        return "Error performing vulnerability analysis. See logs for details."
 
 def validate_target(target: str) -> bool:
     """
@@ -1137,7 +1639,7 @@ def discover_network_targets(network: str) -> list:
     """
     try:
         logger.info(f"Starting network discovery on {network}")
-        nm = nmap.PortScanner()
+        nm = nmap.PortScanner(nmap_search_path=('C:\\Program Files (x86)\\Nmap',))
         nm.scan(hosts=network, arguments='-sn')  # Ping scan
         
         active_hosts = []
@@ -1242,7 +1744,7 @@ def get_shodan_info(ip: str) -> dict:
         logger.error(f"Error getting Shodan info: {str(e)}")
         return {}
 
-def scan(target: str, scan_type: str = 'basic') -> tuple:
+async def scan(target: str, scan_type: str = 'basic'):
     """
     Perform network scan and vulnerability analysis.
     Args:
@@ -1251,41 +1753,75 @@ def scan(target: str, scan_type: str = 'basic') -> tuple:
     Returns:
         tuple: (analysis_results, raw_scan_data)
     """
-    scan_profiles = {
-        'basic': '-Pn -sV -T4 -O -F',
-        'comprehensive': '-Pn -sS -sV -T4 -A -O',
-        'stealth': '-Pn -sS -T2 -O',
-        'full': '-Pn -sS -sV -T4 -A -O -p-'
-    }
-    
-    arguments = scan_profiles.get(scan_type, scan_profiles['basic'])
-    
     try:
         logger.info(f"Starting {scan_type} scan on {target}")
-        with tqdm(total=100, desc=f"Scanning {target}") as pbar:
-            # Perform the scan
-            nm = nmap.PortScanner()
-            nm.scan(hosts=target, arguments=arguments)
-            pbar.update(50)
+        
+        # Initialize scanner
+        scanner = init_scanner()
+        
+        # Validate target
+        if not validate_target(target):
+            raise ValueError(f"Invalid target: {target}")
             
-            # Get scan results
-            if target not in nm.all_hosts():
-                logger.warning(f"No results found for {target}")
-                return "No results found", {}
+        # Run nmap scan
+        nm = nmap.PortScanner(nmap_search_path=('C:\\Program Files (x86)\\Nmap',))
+        scan_args = '-sV -sC' if scan_type == 'comprehensive' else '-sV'
+        
+        try:
+            scan_results = await asyncio.to_thread(nm.scan, target, arguments=scan_args)
+        except Exception as e:
+            logger.error(f"Error during scan: {str(e)}")
+            raise
+            
+        # Extract service information
+        services = []
+        for host in nm.all_hosts():
+            for proto in nm[host].all_protocols():
+                ports = nm[host][proto].keys()
+                for port in ports:
+                    service = nm[host][proto][port]
+                    services.append({
+                        'port': port,
+                        'protocol': proto,
+                        'state': service.get('state'),
+                        'service': service.get('name'),
+                        'product': service.get('product'),
+                        'version': service.get('version'),
+                        'extrainfo': service.get('extrainfo')
+                    })
+                    
+        # Analyze each service
+        analysis_results = []
+        for service in services:
+            service_analysis = await scanner.analyze_service(service)
+            analysis_results.append({
+                'service': service,
+                'analysis': service_analysis
+            })
+            
+        # Get additional host information
+        host_info = {}
+        if scanner.shodan_api:
+            try:
+                host_info = await asyncio.to_thread(get_shodan_info, target)
+            except Exception as e:
+                logger.warning(f"Error getting Shodan info: {str(e)}")
                 
-            scan_data = nm[target]
-            pbar.update(25)
-            
-            # Analyze vulnerabilities
-            analysis = analyze_vulnerabilities(scan_data)
-            pbar.update(25)
-            
-            logger.info(f"Scan completed for {target}")
-            return analysis, scan_data
-            
+        # Format results
+        results = {
+            'target': target,
+            'scan_type': scan_type,
+            'timestamp': datetime.now().isoformat(),
+            'services': services,
+            'analysis': analysis_results,
+            'host_info': host_info
+        }
+        
+        return results
+        
     except Exception as e:
         logger.error(f"Error during scan: {str(e)}")
-        return f"Error during scan: {str(e)}", {}
+        raise
 
 def format_service_info(service_info, analysis):
     """Format service information and analysis results."""
@@ -1373,480 +1909,26 @@ def format_service_info(service_info, analysis):
 def save_results(results, output_prefix):
     """Save scan results to files."""
     try:
-        # Create folders if they don't exist
-        os.makedirs('scans', exist_ok=True)
-        os.makedirs('exploits', exist_ok=True)
-        
-        # Save scan results
-        json_file = os.path.join('scans', f'{output_prefix}.json')
-        txt_file = os.path.join('scans', f'{output_prefix}.txt')
+        # Create output directory if it doesn't exist
+        output_dir = os.path.join(os.getcwd(), 'scans')
+        os.makedirs(output_dir, exist_ok=True)
         
         # Save JSON results
-        with open(json_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        # Save text results
-        with open(txt_file, 'w') as f:
-            f.write(format_results(results))
-        
-        logger.info(f"\nScan results saved to:\n- JSON format: {json_file}\n- Text format: {txt_file}")
-        
-        # Clean up old files
-        cleanup_old_files()
-        
+        json_path = os.path.join(output_dir, f"{output_prefix}.json")
+        with open(json_path, 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+            
+        # Save text report
+        txt_path = os.path.join(output_dir, f"{output_prefix}.txt")
+        with open(txt_path, 'w') as f:
+            f.write(format_text_report(results))
+                
+        return output_dir
     except Exception as e:
         logger.error(f"Error saving results: {str(e)}")
-
-def cleanup_old_files():
-    """Clean up old scan and exploit files."""
-    try:
-        # Keep only the 5 most recent files in each directory
-        for directory in ['scans', 'exploits']:
-            if os.path.exists(directory):
-                files = []
-                for filename in os.listdir(directory):
-                    filepath = os.path.join(directory, filename)
-                    if os.path.isfile(filepath):
-                        files.append((filepath, os.path.getmtime(filepath)))
-                
-                # Sort files by modification time (newest first)
-                files.sort(key=lambda x: x[1], reverse=True)
-                
-                # Remove old files
-                for filepath, _ in files[5:]:
-                    try:
-                        os.remove(filepath)
-                        logger.debug(f"Removed old file: {filepath}")
-                    except Exception as e:
-                        logger.error(f"Error removing file {filepath}: {str(e)}")
-                        
-    except Exception as e:
-        logger.error(f"Error cleaning up old files: {str(e)}")
-
-def generate_exploit_script(service_info, cve_id, exploit_info):
-    """Generate a Python exploit script for the vulnerability."""
-    try:
-        service_name = service_info.get('name', 'Unknown')
-        product = service_info.get('product', '')
-        version = service_info.get('version', '')
-        
-        prompt = f"""Generate a Python exploit script for CVE {cve_id} affecting {service_name} {product} {version}.
-        Include:
-        1. Required imports and dependencies
-        2. Target configuration
-        3. Exploit code with proper error handling
-        4. Example usage
-        Make it a complete, runnable script."""
-        
-        response = get_gemini_response(prompt)
-        
-        if response:
-            # Create exploits directory if it doesn't exist
-            os.makedirs('exploits', exist_ok=True)
-            
-            # Save the exploit script
-            filename = os.path.join('exploits', f'exploit_{cve_id.lower().replace("-", "_")}.py')
-            with open(filename, 'w') as f:
-                f.write(response)
-            logger.info(f"Exploit script saved to {filename}")
-            return filename
-    except Exception as e:
-        logger.error(f"Error generating exploit script: {str(e)}")
-    return None
-
-def format_exploit_guidance(guidance, exploit_info):
-    """Format exploitation guidance with additional details."""
-    output = []
-    
-    # Add Metasploit modules if available
-    if exploit_info:
-        output.append("\nAvailable Exploit Modules:")
-        for exploit in exploit_info:
-            if exploit.get('type') == 'metasploit':
-                output.append(f"\nMetasploit Module: {exploit['path']}")
-                output.append("Commands:")
-                for cmd in exploit['commands']:
-                    output.append(f"  {cmd}")
-    
-    # Add general exploitation guidance
-    if guidance:
-        if guidance.get('prerequisites'):
-            output.append("\nPrerequisites:")
-            for prereq in guidance['prerequisites']:
-                output.append(f"- {prereq}")
-        
-        if guidance.get('exploitation_steps'):
-            output.append("\nExploitation Steps:")
-            for i, step in enumerate(guidance['exploitation_steps'], 1):
-                output.append(f"{i}. {step}")
-        
-        if guidance.get('post_exploitation'):
-            output.append("\nPost-Exploitation:")
-            for post in guidance['post_exploitation']:
-                output.append(f"- {post}")
-    
-    return "\n".join(output)
-
-def calculate_risk_level(target: str) -> str:
-    """Calculate overall risk level based on open ports and services."""
-    try:
-        nm = nmap.PortScanner()
-        nm.scan(target, arguments='-sV')
-        
-        risk_score = 0
-        high_risk_ports = {21, 22, 23, 25, 53, 80, 443, 445, 3389}  # Common vulnerable ports
-        
-        for host in nm.all_hosts():
-            for proto in nm[host].all_protocols():
-                ports = nm[host][proto].keys()
-                for port in ports:
-                    if port in high_risk_ports:
-                        risk_score += 2
-                    else:
-                        risk_score += 1
-                    
-                    # Check service version
-                    service = nm[host][proto][port]
-                    if 'version' in service and service['version']:
-                        if any(v in service['version'].lower() for v in ['old', 'vulnerable', 'outdated']):
-                            risk_score += 2
-        
-        if risk_score > 10:
-            return "High"
-        elif risk_score > 5:
-            return "Medium"
-        else:
-            return "Low"
-    except Exception as e:
-        logger.error(f"Error calculating risk level: {str(e)}")
-        return "Unknown"
-
-def analyze_service_offline(service_data: dict) -> list:
-    """Analyze a service without using AI."""
-    recommendations = []
-    service = service_data.get('name', '').lower()
-    product = service_data.get('product', '').lower()
-    version = service_data.get('version', '')
-
-    # Common service recommendations
-    service_recommendations = {
-        'http': [
-            "Enable HTTPS and redirect HTTP to HTTPS",
-            "Implement security headers (HSTS, CSP, etc.)",
-            "Use WAF for additional protection",
-            "Disable unnecessary HTTP methods",
-            "Implement rate limiting"
-        ],
-        'https': [
-            "Ensure strong SSL/TLS configuration",
-            "Use modern TLS versions (1.2+)",
-            "Implement HSTS with preload",
-            "Monitor SSL certificate expiration",
-            "Enable HTTP/2 for better performance"
-        ],
-        'ssh': [
-            "Use strong SSH key authentication",
-            "Disable password authentication",
-            "Change default port",
-            "Implement fail2ban",
-            "Regular security updates"
-        ],
-        'ftp': [
-            "Replace FTP with SFTP",
-            "Enable TLS encryption",
-            "Implement strong password policy",
-            "Restrict file permissions",
-            "Monitor file transfers"
-        ],
-        'smb': [
-            "Disable SMBv1",
-            "Use encryption for data transfer",
-            "Implement strict access controls",
-            "Regular security updates",
-            "Monitor file sharing activity"
-        ],
-        'rdp': [
-            "Enable Network Level Authentication",
-            "Use strong passwords",
-            "Implement account lockout policies",
-            "Restrict RDP access to VPN",
-            "Monitor login attempts"
-        ],
-        'mysql': [
-            "Remove default users",
-            "Use strong password policy",
-            "Restrict remote access",
-            "Regular security updates",
-            "Enable SSL/TLS encryption"
-        ],
-        'postgresql': [
-            "Configure pg_hba.conf securely",
-            "Use SSL/TLS encryption",
-            "Implement role-based access",
-            "Regular security updates",
-            "Monitor database access"
-        ],
-        'dns': [
-            "Implement DNSSEC",
-            "Use DNS over TLS/HTTPS",
-            "Regular zone file backups",
-            "Monitor DNS queries",
-            "Restrict zone transfers"
-        ],
-        'smtp': [
-            "Enable TLS encryption",
-            "Implement SPF, DKIM, DMARC",
-            "Use strong authentication",
-            "Monitor email traffic",
-            "Regular security updates"
-        ]
-    }
-
-    # Add service-specific recommendations
-    if service in service_recommendations:
-        recommendations.extend(service_recommendations[service])
-
-    # Add version-specific recommendations
-    if version:
-        recommendations.append(f"Ensure {product} {version} is up to date")
-        recommendations.append(f"Check for known vulnerabilities in {product} {version}")
-
-    # Add general security recommendations
-    general_recommendations = [
-        "Implement network segmentation",
-        "Regular security patching",
-        "Monitor service logs",
-        "Implement access controls",
-        "Regular security audits"
-    ]
-    recommendations.extend(general_recommendations)
-
-    return recommendations
-
-async def main():
-    """Main function to run the vulnerability scanner."""
-    try:
-        print("\n=== AI Vulnerability Scanner Starting ===")
-        
-        # Parse arguments
-        args = parser.parse_args()
-        target = args.target
-        scan_type = args.scan_type
-        
-        print(f"\nConfiguration:")
-        print(f"- Target: {target}")
-        print(f"- Scan Type: {scan_type}")
-        
-        # Check environment variables
-        print("\nChecking API Keys:")
-        if os.getenv('VULNERS_API_KEY'):
-            print("✓ Vulners API Key found")
-        else:
-            print("✗ Vulners API Key missing")
-            
-        if os.getenv('SHODAN_API_KEY'):
-            print("✓ Shodan API Key found")
-        else:
-            print("✗ Shodan API Key missing")
-            
-        if os.getenv('GEMINI_API_KEY'):
-            print("✓ Gemini API Key found")
-        else:
-            print("✗ Gemini API Key missing")
-        
-        # Validate target
-        print("\nValidating target...")
-        if not validate_target(target):
-            print("✗ Invalid target specified")
-            return
-        print("✓ Target validation successful")
-
-        print("\nInitializing scanner components...")
-        try:
-            # Initialize scanner
-            scanner = init_scanner()
-            print("✓ Scanner initialized")
-            
-            print(f"\nStarting {scan_type} scan of {target}...")
-            
-            # Perform scan
-            try:
-                results = await scanner.scan(target, scan_type)
-                
-                if results:
-                    print("\n=== Scan Results ===")
-                    print(f"Target: {target}")
-                    print(f"Hostname: {', '.join(results.get('hostnames', []))}")
-                    print(f"Risk Level: {results.get('risk_level', 'Unknown')}")
-                    
-                    # Print service analysis
-                    services = results.get('services', {})
-                    if services:
-                        print("\nDiscovered Services:")
-                        for service_id, service in services.items():
-                            print(f"\n{service_id}:")
-                            print(f"- Name: {service.get('name', '')}")
-                            print(f"- Product: {service.get('product', '')}")
-                            print(f"- Version: {service.get('version', '')}")
-                            
-                            if service.get('recommendations'):
-                                print("Recommendations:")
-                                for rec in service['recommendations']:
-                                    print(f"  - {rec}")
-                    
-                    # Save results
-                    print("\nSaving results...")
-                    save_results(results, 'scan_results')
-                    print("✓ Results saved to:")
-                    print("  - scans/scan_results.json")
-                    print("  - scans/scan_results.txt")
-                
-            except Exception as e:
-                print(f"\n✗ Error during scan: {str(e)}")
-                traceback.print_exc()
-                
-        except Exception as e:
-            print(f"\n✗ Error initializing components: {str(e)}")
-            traceback.print_exc()
-            
-    except Exception as e:
-        print(f"\n✗ Error in main: {str(e)}")
-        traceback.print_exc()
-    
-    finally:
-        print("\n=== Scan Complete ===")
-
-async def scan(target: str, scan_type: str = 'basic') -> dict:
-    """Perform network scan and vulnerability analysis."""
-    try:
-        print("\nStarting network scan...")
-        
-        # Prepare scan arguments
-        if scan_type == 'comprehensive':
-            arguments = '-sV -sC -O -p- --version-intensity 5'
-            print("Using comprehensive scan (this may take longer)")
-        else:
-            arguments = '-sV -sC'
-            print("Using basic scan")
-        
-        # Perform nmap scan
-        print(f"Running nmap scan on {target}...")
-        nm = nmap.PortScanner()
-        nm.scan(hosts=target, arguments=arguments)
-        print("✓ Nmap scan complete")
-        
-        scan_results = {
-            'target': target,
-            'scan_time': datetime.now().isoformat(),
-            'hostnames': get_hostnames(target),
-            'risk_level': calculate_risk_level(target),
-            'services': {},
-            'shodan_info': {}
-        }
-        
-        # Process results for each host
-        for host in nm.all_hosts():
-            print(f"\nAnalyzing host: {host}")
-            
-            if nm[host].state() == 'up':
-                # Get Shodan information
-                try:
-                    print("Fetching Shodan information...")
-                    shodan_info = get_shodan_info(host)
-                    if shodan_info:
-                        scan_results['shodan_info'] = shodan_info
-                        print("✓ Shodan information retrieved")
-                    else:
-                        print("- No Shodan information available")
-                except Exception as e:
-                    print(f"✗ Error getting Shodan info: {str(e)}")
-                
-                # Process each protocol
-                for proto in nm[host].all_protocols():
-                    ports = nm[host][proto].keys()
-                    
-                    # Analyze each port
-                    for port in ports:
-                        print(f"\nAnalyzing port {port}/{proto}...")
-                        service = nm[host][proto][port]
-                        service_info = {
-                            'port': port,
-                            'protocol': proto,
-                            'name': service.get('name', ''),
-                            'product': service.get('product', ''),
-                            'version': service.get('version', ''),
-                            'extrainfo': service.get('extrainfo', ''),
-                            'ip': host
-                        }
-                        
-                        # Get service analysis
-                        try:
-                            print(f"Analyzing service: {service_info['name']}...")
-                            analysis = await scanner.analyze_service(service_info)
-                            service_info.update(analysis)
-                            scan_results['services'][f"{port}/{proto}"] = service_info
-                            print(f"✓ Service analysis complete")
-                        except Exception as e:
-                            print(f"✗ Error analyzing service: {str(e)}")
-        
-        return scan_results
-            
-    except Exception as e:
-        print(f"✗ Error during scan: {str(e)}")
-        traceback.print_exc()
-        raise
-
-def init_vulners_api():
-    """Initialize Vulners API with API key from environment."""
-    try:
-        api_key = os.getenv('VULNERS_API_KEY')
-        if not api_key:
-            logger.warning("No Vulners API key found in environment")
-            return None
-        
-        # Initialize without retry configuration
-        vulners_api = vulners.Vulners(api_key=api_key)
-        return vulners_api
-    except Exception as e:
-        logger.error(f"Error initializing Vulners API: {str(e)}")
         return None
 
-def get_hostnames(ip: str) -> list:
-    """Get hostnames for an IP address."""
-    try:
-        hostnames = socket.gethostbyaddr(ip)[0]
-        return [hostnames] if isinstance(hostnames, str) else hostnames
-    except (socket.herror, socket.gaierror):
-        return []
-
-def save_results(results, output_prefix):
-    """Save scan results to files."""
-    try:
-        # Create folders if they don't exist
-        os.makedirs('scans', exist_ok=True)
-        os.makedirs('exploits', exist_ok=True)
-        
-        # Save scan results
-        json_file = os.path.join('scans', f'{output_prefix}.json')
-        txt_file = os.path.join('scans', f'{output_prefix}.txt')
-        
-        # Save JSON results
-        with open(json_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        # Save text results
-        with open(txt_file, 'w') as f:
-            f.write(format_results(results))
-        
-        logger.info(f"\nScan results saved to:\n- JSON format: {json_file}\n- Text format: {txt_file}")
-        
-        # Clean up old files
-        cleanup_old_files()
-        
-    except Exception as e:
-        logger.error(f"Error saving results: {str(e)}")
-
-def format_results(results):
+def format_text_report(results):
     """Format scan results as text."""
     output = []
     
@@ -1859,7 +1941,7 @@ def format_results(results):
     # Format service analysis
     output.append("Service Analysis:\n")
     for service in results['services'].values():
-        output.append(f"{service['port']}/tcp - {service['name']} ({service.get('product', '')} {service.get('version', '')})")
+        output.append(f"\n{service['port']}/tcp - {service['name']} ({service.get('product', '')} {service.get('version', '')})")
         if service.get('recommendations'):
             output.append("Recommendations:")
             # Handle recommendations that might be a list
@@ -1877,80 +1959,291 @@ def format_results(results):
     
     return "\n".join(str(line) for line in output)
 
+def init_vulners_api():
+    """Initialize Vulners API with API key from environment."""
+    try:
+        api_key = os.getenv('VULNERS_API_KEY')
+        if not api_key:
+            logger.warning("No Vulners API key found in environment. Vulnerability database lookups will be limited.")
+            return None
+        
+        try:
+            # Initialize without retry configuration
+            vulners_api = vulners.Vulners(api_key=api_key)
+            return vulners_api
+        except ImportError:
+            logger.warning("Vulners library not installed. Vulnerability database lookups will be limited.")
+            return None
+        except Exception as e:
+            logger.warning(f"Error initializing Vulners API: {str(e)}. Continuing without it.")
+            return None
+    except Exception as e:
+        logger.warning(f"Unexpected error initializing Vulners API: {str(e)}. Continuing without it.")
+        return None
+
+def get_hostnames(ip: str) -> list:
+    """Get hostnames for an IP address."""
+    try:
+        hostnames = socket.gethostbyaddr(ip)[0]
+        return [hostnames] if isinstance(hostnames, str) else hostnames
+    except (socket.herror, socket.gaierror):
+        return []
+
+def init_shodan_api():
+    """Initialize Shodan API with API key from environment."""
+    try:
+        api_key = os.getenv('SHODAN_API_KEY')
+        if not api_key:
+            logger.warning("No Shodan API key found in environment. External reconnaissance will be limited.")
+            return None
+        
+        try:
+            import shodan
+            shodan_api = shodan.Shodan(api_key)
+            # Test with a simple request to verify API key works
+            try:
+                info = shodan_api.info()
+                return shodan_api
+            except Exception as e:
+                logger.warning(f"Shodan API key validation failed: {str(e)}. Continuing without it.")
+                return None
+        except ImportError:
+            logger.warning("Shodan library not installed. External reconnaissance will be limited.")
+            return None
+        except Exception as e:
+            logger.warning(f"Error initializing Shodan API: {str(e)}. Continuing without it.")
+            return None
+    except Exception as e:
+        logger.warning(f"Unexpected error initializing Shodan API: {str(e)}. Continuing without it.")
+        return None
+
 def init_gemini():
     """Initialize Google Gemini API with proper configuration."""
     try:
+        api_key = os.getenv('GEMINI_API_KEY')
+        if not api_key:
+            logger.warning("Gemini API key not found. Gemini AI analysis will be disabled.")
+            return None
+            
         # Check if location is supported
         try:
-            response = requests.get('https://ipapi.co/json/')
+            response = requests.get('https://ipapi.co/json/', timeout=5)
             if response.status_code == 200:
                 data = response.json()
                 country = data.get('country_name', 'Unknown')
                 if country not in ['United States', 'Canada', 'United Kingdom']:  # Add more supported countries
-                    print(f"✗ Gemini API not available in {country}. Using fallback analysis.")
+                    logger.warning(f"Gemini API not available in {country}. Using fallback analysis.")
                     return None
         except Exception as e:
-            print(f"✗ Error checking location: {str(e)}")
-            return None
+            logger.warning(f"Error checking location: {str(e)}. Continuing without location check.")
+            # Continue anyway, let the API call itself determine if region is supported
 
-        genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
-        
-        # Configure the model with safety settings
-        model = genai.GenerativeModel('gemini-pro',
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.3,
-                candidate_count=1,
-                max_output_tokens=2048,
-            ),
-            safety_settings=[
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                },
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_MEDIUM_AND_ABOVE"
-                }
-            ]
-        )
-        print("✓ Gemini AI initialized")
-        return model
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=api_key)
+            
+            # Configure the model with safety settings
+            model = genai.GenerativeModel('gemini-pro',
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.3,
+                    candidate_count=1,
+                    max_output_tokens=2048,
+                ),
+                safety_settings=[
+                    {
+                        "category": "HARM_CATEGORY_HARASSMENT",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_HATE_SPEECH",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    },
+                    {
+                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        "threshold": "BLOCK_MEDIUM_AND_ABOVE"
+                    }
+                ]
+            )
+            print("+ Gemini AI initialized")
+            return model
+        except ImportError:
+            logger.warning("Google Generative AI library not installed. Gemini AI analysis will be disabled.")
+            return None
+        except Exception as e:
+            logger.warning(f"Error initializing Gemini API: {str(e)}. Continuing without it.")
+            return None
     except Exception as e:
-        print(f"✗ Error initializing Gemini API: {str(e)}")
+        logger.warning(f"Unexpected error initializing Gemini API: {str(e)}. Continuing without it.")
         return None
 
 def init_openai():
     """Initialize OpenAI API with proper configuration."""
-    api_key = os.getenv('OPENAI_API_KEY')
-    if not api_key:
-        logger.warning("OpenAI API key not found. OpenAI analysis will be disabled.")
-        return None
-        
     try:
-        import openai
-        openai.api_key = api_key
-        return openai.Client()
+        api_key = os.getenv('OPENAI_API_KEY')
+        if not api_key:
+            logger.warning("OpenAI API key not found. OpenAI analysis will be disabled.")
+            return None
+            
+        try:
+            import openai
+            client = openai.OpenAI(api_key=api_key)
+            # Test with a simple request to verify API key works
+            try:
+                response = client.models.list()
+                print("+ OpenAI API initialized")
+                return client
+            except Exception as e:
+                logger.warning(f"OpenAI API key validation failed: {str(e)}. Continuing without it.")
+                return None
+        except ImportError:
+            logger.warning("OpenAI library not installed. OpenAI analysis will be disabled.")
+            return None
+        except Exception as e:
+            logger.warning(f"Error initializing OpenAI client: {str(e)}. Continuing without it.")
+            return None
     except Exception as e:
-        logger.error(f"Failed to initialize OpenAI: {str(e)}")
+        logger.warning(f"Unexpected error initializing OpenAI: {str(e)}. Continuing without it.")
         return None
 
 def init_local_ml_model():
     """Initialize local machine learning model for basic analysis."""
     try:
-        # TODO: Implement local ML model initialization
-        return None
+        try:
+            import torch
+            from transformers import AutoModelForSequenceClassification, AutoTokenizer
+            
+            # Check if CUDA is available
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            try:
+                model_name = "microsoft/codebert-base"
+                tokenizer = AutoTokenizer.from_pretrained(model_name)
+                model = AutoModelForSequenceClassification.from_pretrained(model_name)
+                model.to(device)
+                
+                print("+ Local ML model initialized")
+                return model  # Return the model object
+            except Exception as e:
+                logger.warning(f"Error loading ML model: {str(e)}. Continuing without it.")
+                return None
+        except ImportError:
+            logger.warning("Required ML libraries not installed. Local ML analysis will be disabled.")
+            return None
     except Exception as e:
-        logger.error(f"Failed to initialize local ML model: {str(e)}")
+        logger.warning(f"Unexpected error initializing local ML model: {str(e)}. Continuing without it.")
+        return None
+
+def init_ai_analyzer():
+    """Initialize AI Security Analyzer."""
+    try:
+        return AISecurityAnalyzer()
+    except Exception as e:
+        logger.warning(f"Failed to initialize AI analyzer: {str(e)}")
+        return None
+
+async def main():
+    """Main entry point for the vulnerability scanner."""
+    try:
+        # Initialize scanner
+        scanner = init_scanner()
+        
+        # Validate target
+        if not validate_target(args.target):
+            logger.error(f"Invalid target: {args.target}")
+            return
+            
+        # Run scan based on type
+        if args.scan_type == 'container':
+            container_scanner = ContainerScanner()
+            results = await container_scanner.scan_container(args.target)
+        elif args.scan_type == 'cloud':
+            cloud_scanner = CloudScanner()
+            results = await cloud_scanner.scan_cloud_infrastructure(args.cloud_providers)
+        else:
+            results = await scan(args.target, args.scan_type)
+            
+        # Save results if output file specified
+        if args.output:
+            save_results(results, args.output)
+            
+        return results
+        
+    except Exception as e:
+        logger.error(f"Error running vulnerability scan: {str(e)}")
+        if args.verbose:
+            logger.error(traceback.format_exc())
         return None
 
 if __name__ == "__main__":
     # Run the async main function
     asyncio.run(main())
+
+def analyze_service_offline(service_data: dict) -> List[str]:
+    """Analyze a service without using AI models."""
+    recommendations = []
+    
+    # Basic service checks
+    service_name = service_data.get('name', '').lower()
+    product = service_data.get('product', '').lower()
+    version = service_data.get('version', '')
+    
+    # Check for common high-risk services
+    high_risk_services = {
+        'telnet': 'Telnet uses unencrypted communications. Replace with SSH.',
+        'ftp': 'FTP sends credentials in plaintext. Use SFTP or FTPS instead.',
+        'smtp': 'Ensure SMTP is properly configured with TLS encryption.',
+        'mysql': 'Restrict MySQL access and use encrypted connections.',
+        'mongodb': 'Ensure MongoDB authentication is enabled and properly configured.',
+        'redis': 'Redis should not be exposed to public networks.',
+        'elasticsearch': 'Elasticsearch should be properly secured with authentication.',
+        'jenkins': 'Jenkins should be behind a secure proxy with authentication.',
+        'wordpress': 'Keep WordPress and all plugins up to date.',
+        'phpmyadmin': 'PhpMyAdmin should be protected and regularly updated.',
+    }
+    
+    # Add service-specific recommendations
+    if service_name in high_risk_services:
+        recommendations.append(high_risk_services[service_name])
+    
+    # Version checks
+    if version:
+        recommendations.append(f"Verify {product} version {version} is the latest stable release")
+    
+    # Port-specific recommendations
+    port = service_data.get('port', 0)
+    if port < 1024:
+        recommendations.append(f"Service running on privileged port {port}. Consider running as non-root if possible.")
+    
+    # Protocol recommendations
+    if service_data.get('protocol') == 'tcp':
+        recommendations.append("Ensure firewall rules restrict access to necessary IPs only")
+    
+    # SSL/TLS checks
+    if 'http' in service_name or 'https' in service_name:
+        recommendations.extend([
+            "Verify SSL/TLS configuration and certificate validity",
+            "Enable HTTP Strict Transport Security (HSTS)",
+            "Implement proper Content Security Policy (CSP)"
+        ])
+    
+    # Database recommendations
+    if any(db in service_name for db in ['mysql', 'postgresql', 'mongodb', 'redis']):
+        recommendations.extend([
+            "Ensure strong authentication is enabled",
+            "Regularly backup database content",
+            "Monitor for unusual access patterns"
+        ])
+    
+    # Remote access recommendations
+    if any(remote in service_name for remote in ['ssh', 'rdp', 'vnc']):
+        recommendations.extend([
+            "Use strong authentication methods",
+            "Implement fail2ban or similar brute-force protection",
+            "Restrict access to specific IP ranges"
+        ])
+    
+    return recommendations

@@ -15,8 +15,8 @@ import boto3
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.subscription import SubscriptionClient
-from google.cloud import security_center_v1
-from google.cloud import asset_v1
+from google.cloud.securitycenter_v1 import SecurityCenterClient
+from google.cloud.asset_v1 import AssetServiceClient
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -82,8 +82,8 @@ class CloudScanner:
             
         try:
             # GCP
-            self.gcp_security_client = security_center_v1.SecurityCenterClient()
-            self.gcp_asset_client = asset_v1.AssetServiceClient()
+            self.gcp_security_client = SecurityCenterClient()
+            self.gcp_asset_client = AssetServiceClient()
             self.gcp_enabled = True
             logger.info("GCP client initialized successfully")
         except Exception as e:

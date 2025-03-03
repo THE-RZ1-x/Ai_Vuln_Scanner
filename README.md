@@ -10,6 +10,7 @@ A comprehensive security assessment tool that leverages artificial intelligence 
 - **False Positive Reduction**: AI-powered verification of findings to minimize false positives
 - **Pattern Recognition**: Machine learning for identifying complex attack patterns
 - **Context-Aware Analysis**: Understands system context for more accurate risk assessment
+- **Resilient Operation**: Gracefully handles missing API keys, continuing with reduced functionality
 
 ### 2. Network Security Scanning
 - **Port Scanning**: Advanced port scanning with service detection
@@ -88,6 +89,7 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Edit .env with your API keys and credentials
+# Note: The scanner will function with missing API keys, but with reduced capabilities
 ```
 
 ## Usage
@@ -120,6 +122,23 @@ python vulnscanner.py -t cloud -s cloud --cloud-providers aws azure
 # Scan single provider
 python vulnscanner.py -t aws -s cloud
 ```
+
+## API Key Configuration
+
+The scanner uses several API keys to enhance its capabilities, but is designed to function even when some or all keys are missing:
+
+- **Vulners API**: Used for vulnerability database lookups
+- **Shodan API**: Used for external reconnaissance
+- **Gemini API**: Used for AI-powered analysis
+- **OpenAI API**: Used for AI-powered analysis
+
+When API keys are missing, the scanner will:
+1. Notify you about which keys are missing
+2. Continue operation with reduced functionality
+3. Use offline analysis methods where possible
+4. Provide clear indications of limitations in the scan results
+
+This resilient design ensures the scanner remains useful in environments with limited API access.
 
 ## Detailed Usage Guide
 
