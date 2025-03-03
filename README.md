@@ -1,4 +1,4 @@
-# AI-Powered Vulnerability Scanner (BETA)
+# AI-Powered Vulnerability Scanner (BETA+FIXED)
 
 A comprehensive security assessment tool that leverages artificial intelligence to detect vulnerabilities, misconfigurations, and security risks across networks, web applications, containers, and cloud infrastructure.
 
