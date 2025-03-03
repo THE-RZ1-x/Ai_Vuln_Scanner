@@ -40,6 +40,54 @@ from report_generator import ReportGenerator, ReportData
 from container_scanner import ContainerScanner, ContainerScanResult, ContainerVulnerability
 from cloud_scanner import CloudScanner, CloudScanResult
 
+def analyze_service_offline(service_info: dict) -> list:
+    """Analyze a service without requiring external APIs."""
+    recommendations = []
+    
+    # Basic service checks
+    if not service_info.get('product'):
+        recommendations.append("Service identification failed - manual investigation recommended")
+        return recommendations
+    
+    # Version checks
+    if service_info.get('version'):
+        recommendations.append(f"Update {service_info.get('product')} to the latest version")
+    
+    # Port-specific recommendations
+    port = service_info.get('port', 0)
+    if port < 1024:
+        recommendations.append(f"Service running on privileged port {port}. Consider running as non-root if possible.")
+    
+    # Protocol recommendations
+    if service_info.get('protocol') == 'tcp':
+        recommendations.append("Ensure firewall rules restrict access to necessary IPs only")
+    
+    # SSL/TLS checks
+    if 'http' in service_info.get('name', '').lower() or 'https' in service_info.get('name', '').lower():
+        recommendations.extend([
+            "Verify SSL/TLS configuration and certificate validity",
+            "Enable HTTP Strict Transport Security (HSTS)",
+            "Implement proper Content Security Policy (CSP)"
+        ])
+    
+    # Database recommendations
+    if any(db in service_info.get('name', '').lower() for db in ['mysql', 'postgresql', 'mongodb', 'redis']):
+        recommendations.extend([
+            "Ensure strong authentication is enabled",
+            "Regularly backup database content",
+            "Monitor for unusual access patterns"
+        ])
+    
+    # Remote access recommendations
+    if any(remote in service_info.get('name', '').lower() for remote in ['ssh', 'rdp', 'vnc']):
+        recommendations.extend([
+            "Use strong authentication methods",
+            "Implement fail2ban or similar brute-force protection",
+            "Restrict access to specific IP ranges"
+        ])
+    
+    return recommendations
+
 # Parse command line arguments
 parser = argparse.ArgumentParser(description='AI-powered vulnerability scanner')
 parser.add_argument('-t', '--target', required=True, help='Target IP address, hostname, container image, or cloud provider')
@@ -1475,7 +1523,7 @@ class NetworkMapper:
             recommendations.append("Ensure firewall rules restrict access to necessary IPs only")
         
         # SSL/TLS checks
-        if 'http' in service.get('name', '') or 'https' in service.get('name', ''):
+        if 'http' in service.get('name', '').lower() or 'https' in service.get('name', '').lower():
             recommendations.extend([
                 "Verify SSL/TLS configuration and certificate validity",
                 "Enable HTTP Strict Transport Security (HSTS)",
@@ -1483,7 +1531,7 @@ class NetworkMapper:
             ])
         
         # Database recommendations
-        if any(db in service.get('name', '') for db in ['mysql', 'postgresql', 'mongodb', 'redis']):
+        if any(db in service.get('name', '').lower() for db in ['mysql', 'postgresql', 'mongodb', 'redis']):
             recommendations.extend([
                 "Ensure strong authentication is enabled",
                 "Regularly backup database content",
@@ -1491,7 +1539,7 @@ class NetworkMapper:
             ])
         
         # Remote access recommendations
-        if any(remote in service.get('name', '') for remote in ['ssh', 'rdp', 'vnc']):
+        if any(remote in service.get('name', '').lower() for remote in ['ssh', 'rdp', 'vnc']):
             recommendations.extend([
                 "Use strong authentication methods",
                 "Implement fail2ban or similar brute-force protection",
@@ -2181,69 +2229,3 @@ async def main():
 if __name__ == "__main__":
     # Run the async main function
     asyncio.run(main())
-
-def analyze_service_offline(service_data: dict) -> List[str]:
-    """Analyze a service without using AI models."""
-    recommendations = []
-    
-    # Basic service checks
-    service_name = service_data.get('name', '').lower()
-    product = service_data.get('product', '').lower()
-    version = service_data.get('version', '')
-    
-    # Check for common high-risk services
-    high_risk_services = {
-        'telnet': 'Telnet uses unencrypted communications. Replace with SSH.',
-        'ftp': 'FTP sends credentials in plaintext. Use SFTP or FTPS instead.',
-        'smtp': 'Ensure SMTP is properly configured with TLS encryption.',
-        'mysql': 'Restrict MySQL access and use encrypted connections.',
-        'mongodb': 'Ensure MongoDB authentication is enabled and properly configured.',
-        'redis': 'Redis should not be exposed to public networks.',
-        'elasticsearch': 'Elasticsearch should be properly secured with authentication.',
-        'jenkins': 'Jenkins should be behind a secure proxy with authentication.',
-        'wordpress': 'Keep WordPress and all plugins up to date.',
-        'phpmyadmin': 'PhpMyAdmin should be protected and regularly updated.',
-    }
-    
-    # Add service-specific recommendations
-    if service_name in high_risk_services:
-        recommendations.append(high_risk_services[service_name])
-    
-    # Version checks
-    if version:
-        recommendations.append(f"Verify {product} version {version} is the latest stable release")
-    
-    # Port-specific recommendations
-    port = service_data.get('port', 0)
-    if port < 1024:
-        recommendations.append(f"Service running on privileged port {port}. Consider running as non-root if possible.")
-    
-    # Protocol recommendations
-    if service_data.get('protocol') == 'tcp':
-        recommendations.append("Ensure firewall rules restrict access to necessary IPs only")
-    
-    # SSL/TLS checks
-    if 'http' in service_name or 'https' in service_name:
-        recommendations.extend([
-            "Verify SSL/TLS configuration and certificate validity",
-            "Enable HTTP Strict Transport Security (HSTS)",
-            "Implement proper Content Security Policy (CSP)"
-        ])
-    
-    # Database recommendations
-    if any(db in service_name for db in ['mysql', 'postgresql', 'mongodb', 'redis']):
-        recommendations.extend([
-            "Ensure strong authentication is enabled",
-            "Regularly backup database content",
-            "Monitor for unusual access patterns"
-        ])
-    
-    # Remote access recommendations
-    if any(remote in service_name for remote in ['ssh', 'rdp', 'vnc']):
-        recommendations.extend([
-            "Use strong authentication methods",
-            "Implement fail2ban or similar brute-force protection",
-            "Restrict access to specific IP ranges"
-        ])
-    
-    return recommendations
