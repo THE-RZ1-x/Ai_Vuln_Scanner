@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import plotly.graph_objects as go
 import plotly.express as px
 import pandas as pd
+import traceback
 
 logger = logging.getLogger(__name__)
 
@@ -35,23 +36,32 @@ class ReportGenerator:
         self._ensure_template_dir()
         self.env = Environment(loader=FileSystemLoader(template_dir))
         
-    def generate_report(self, data: ReportData, output_dir: str) -> str:
+    def generate_report(self, data: Dict, output_dir: str) -> str:
         """Generate an interactive HTML report."""
         try:
+            # Transform data to match expected format
+            transformed_data = self._transform_data(data)
+            
             # Create visualizations
-            charts = self._create_visualizations(data)
+            charts = self._create_visualizations(transformed_data)
             
             # Render the template
             template = self.env.get_template("report_template.html")
             report_html = template.render(
-                data=data,
+                data=transformed_data,
                 charts=charts,
                 current_time=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             )
             
             # Save the report
             os.makedirs(output_dir, exist_ok=True)
-            report_path = os.path.join(output_dir, f"security_report_{data.timestamp}.html")
+            
+            # Sanitize the timestamp for the filename
+            timestamp = transformed_data.get('timestamp', 'unknown')
+            # Replace colons and other invalid characters with underscores
+            safe_timestamp = timestamp.replace(':', '_').replace('-', '_').replace('.', '_').replace(' ', '_')
+            
+            report_path = os.path.join(output_dir, f"security_report_{safe_timestamp}.html")
             with open(report_path, "w", encoding="utf-8") as f:
                 f.write(report_html)
                 
@@ -60,14 +70,92 @@ class ReportGenerator:
             
         except Exception as e:
             logger.error(f"Error generating report: {str(e)}")
+            logger.debug(f"Report generation exception details: {traceback.format_exc()}")
             raise
             
-    def _create_visualizations(self, data: ReportData) -> Dict[str, str]:
+    def _transform_data(self, data: Dict) -> Dict:
+        """Transform scan results to match the expected report format."""
+        # Create a copy to avoid modifying the original
+        transformed = data.copy()
+        
+        # Add risk score
+        if 'risk_level' in transformed:
+            risk_scores = {
+                'critical': 9.5,
+                'high': 7.5,
+                'medium': 5.0,
+                'low': 2.5,
+                'info': 0.5,
+                'unknown': 1.0
+            }
+            transformed['risk_score'] = risk_scores.get(transformed.get('risk_level', 'unknown').lower(), 5.0)
+        else:
+            transformed['risk_score'] = 5.0
+            
+        # Transform analysis to vulnerabilities format
+        vulnerabilities = []
+        for service_analysis in transformed.get('analysis', []):
+            service = service_analysis.get('service', {})
+            analysis_items = service_analysis.get('analysis', [])
+            
+            # Skip if no service or analysis
+            if not service or not analysis_items:
+                continue
+                
+            # Convert each analysis item to a vulnerability
+            if isinstance(analysis_items, list):
+                for item in analysis_items:
+                    if isinstance(item, str):
+                        vuln = {
+                            'type': 'Configuration',
+                            'severity': self._determine_severity(item),
+                            'description': item,
+                            'remediation': 'Follow security best practices',
+                            'service': f"{service.get('port', 'unknown')}/{service.get('protocol', 'tcp')} - {service.get('service', 'unknown')}"
+                        }
+                        vulnerabilities.append(vuln)
+                    elif isinstance(item, dict):
+                        vuln = {
+                            'type': item.get('type', 'Unknown'),
+                            'severity': item.get('severity', 'Medium'),
+                            'description': item.get('description', ''),
+                            'remediation': item.get('remediation', 'Follow security best practices'),
+                            'service': f"{service.get('port', 'unknown')}/{service.get('protocol', 'tcp')} - {service.get('service', 'unknown')}"
+                        }
+                        vulnerabilities.append(vuln)
+            elif isinstance(analysis_items, str):
+                vuln = {
+                    'type': 'Configuration',
+                    'severity': self._determine_severity(analysis_items),
+                    'description': analysis_items,
+                    'remediation': 'Follow security best practices',
+                    'service': f"{service.get('port', 'unknown')}/{service.get('protocol', 'tcp')} - {service.get('service', 'unknown')}"
+                }
+                vulnerabilities.append(vuln)
+                
+        transformed['vulnerabilities'] = vulnerabilities
+        return transformed
+        
+    def _determine_severity(self, text: str) -> str:
+        """Determine the severity based on the text content."""
+        text = text.lower()
+        if any(word in text for word in ['critical', 'severe', 'urgent', 'exploit', 'remote code execution', 'rce']):
+            return 'Critical'
+        elif any(word in text for word in ['high', 'important', 'sql injection', 'xss', 'cross-site']):
+            return 'High'
+        elif any(word in text for word in ['medium', 'moderate', 'update', 'patch']):
+            return 'Medium'
+        elif any(word in text for word in ['low', 'minor', 'informational']):
+            return 'Low'
+        else:
+            return 'Medium'  # Default to medium if unknown
+
+    def _create_visualizations(self, data: Dict) -> Dict[str, str]:
         """Create interactive visualizations using plotly."""
         charts = {}
         
         # Vulnerability severity distribution
-        severity_counts = self._count_severity(data.vulnerabilities)
+        severity_counts = self._count_severity(data.get('vulnerabilities', []))
         fig = go.Figure(data=[
             go.Pie(labels=list(severity_counts.keys()),
                   values=list(severity_counts.values()),
@@ -77,7 +165,7 @@ class ReportGenerator:
         charts['severity_dist'] = fig.to_html(full_html=False)
         
         # Vulnerability types breakdown
-        vuln_types = self._count_vulnerability_types(data.vulnerabilities)
+        vuln_types = self._count_vulnerability_types(data.get('vulnerabilities', []))
         fig = px.bar(
             x=list(vuln_types.keys()),
             y=list(vuln_types.values()),
@@ -86,21 +174,33 @@ class ReportGenerator:
         charts['vuln_types'] = fig.to_html(full_html=False)
         
         # Risk score timeline
-        if hasattr(data, 'risk_timeline'):
-            df = pd.DataFrame(data.risk_timeline)
+        if 'risk_timeline' in data:
+            df = pd.DataFrame(data['risk_timeline'])
             fig = px.line(df, x='timestamp', y='risk_score',
                          title="Risk Score Timeline")
             charts['risk_timeline'] = fig.to_html(full_html=False)
             
         # Network services distribution
-        service_types = self._count_service_types(data.network_services)
-        fig = px.treemap(
-            names=list(service_types.keys()),
-            parents=[""] * len(service_types),
-            values=list(service_types.values()),
-            title="Network Services Distribution"
-        )
-        charts['service_dist'] = fig.to_html(full_html=False)
+        # Extract services from the data structure
+        services = []
+        if 'services' in data:
+            for port, service_info in data['services'].items():
+                services.append(service_info)
+                
+        service_types = self._count_service_types(services)
+        if service_types:
+            fig = px.treemap(
+                names=list(service_types.keys()),
+                parents=[""] * len(service_types),
+                values=list(service_types.values()),
+                title="Network Services Distribution"
+            )
+            charts['service_dist'] = fig.to_html(full_html=False)
+        else:
+            # Create a placeholder if no services
+            fig = go.Figure()
+            fig.update_layout(title="No Network Services Found")
+            charts['service_dist'] = fig.to_html(full_html=False)
         
         return charts
         
@@ -124,7 +224,7 @@ class ReportGenerator:
         """Count network services by type."""
         service_counts = {}
         for service in services:
-            service_type = service.get("name", "Unknown")
+            service_type = service.get("service", "Unknown")
             service_counts[service_type] = service_counts.get(service_type, 0) + 1
         return service_counts
         
