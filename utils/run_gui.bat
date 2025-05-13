@@ -1,0 +1,3 @@
+@echo off
+echo Starting AI Vulnerability Scanner GUI...
+d:\python\python.exe gui_scanner.py

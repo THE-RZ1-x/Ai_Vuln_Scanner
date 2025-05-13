@@ -1,13 +1,39 @@
 #!/usr/bin/env python3
 """
-Web Application Vulnerability Scanner Module
-Part of AI-Powered Vulnerability Scanner
+Web Application Vulnerability Scanner
+Copyright (c) 2025 RHAZOUANE SALAH-EDDINE
+All rights reserved.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+PROPRIETARY NOTICE:
+This software is the confidential and proprietary information of
+RHAZOUANE SALAH-EDDINE. You shall not disclose such confidential
+information and shall use it only in accordance with the terms
+of the license agreement you entered into with RHAZOUANE SALAH-EDDINE.
+
+Author: RHAZOUANE SALAH-EDDINE
+Repository: https://github.com/THE-RZ1-x/Ai_Vuln_Scanner
+Profile: https://github.com/THE-RZ1-x
+Version: 2.0
 """
 
 import asyncio
 import aiohttp
 import logging
 import re
+import time
 from typing import Dict, List, Set
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
@@ -64,6 +90,160 @@ class WebScanner:
             return self.found_vulnerabilities
         finally:
             await self.cleanup()
+            
+    async def check_xss_vulnerabilities(self):
+        """Check for XSS vulnerabilities in all visited URLs."""
+        # This method is called after crawling, so we already have forms tested
+        # Additional XSS checks can be implemented here
+        for url in self.visited_urls:
+            try:
+                # Check for DOM-based XSS vulnerabilities
+                async with self.session.get(url) as response:
+                    text = await response.text()
+                    if any(pattern in text.lower() for pattern in [
+                        'document.write(',
+                        'eval(',
+                        'innerHTML',
+                        'outerHTML',
+                        'document.location',
+                        'document.url',
+                        'document.referrer',
+                        'location.hash',
+                        'location.href',
+                        'window.name'
+                    ]):
+                        self._add_vulnerability('DOM XSS', url, 'DOM', 'Medium',
+                            'Potential DOM-based XSS vulnerability found',
+                            'JavaScript using unsafe DOM methods detected',
+                            'Use safe DOM manipulation methods and sanitize user inputs')
+            except Exception as e:
+                logger.error(f"Error checking DOM XSS on {url}: {str(e)}")
+                
+    async def check_sql_injection(self):
+        """Check for SQL injection vulnerabilities in all visited URLs."""
+        # This method is called after crawling, so we already have forms tested
+        # Additional SQL injection checks can be implemented here
+        for url in self.visited_urls:
+            try:
+                # Check for time-based blind SQL injection
+                sql_time_payloads = [
+                    "?id=1' AND (SELECT * FROM (SELECT(SLEEP(0)))a)-- -",
+                    "?param=1' AND SLEEP(0)-- -"
+                ]
+                
+                for payload in sql_time_payloads:
+                    test_url = urljoin(url, payload)
+                    start_time = time.time()
+                    async with self.session.get(test_url) as response:
+                        await response.text()
+                    response_time = time.time() - start_time
+                    
+                    # If response time is significantly longer, it might be vulnerable
+                    if response_time > 5.0:  # 5 seconds threshold
+                        self._add_vulnerability('Blind SQL Injection', url, 'time-based', 'Critical',
+                            'Potential time-based blind SQL injection vulnerability',
+                            f'Response time: {response_time:.2f} seconds with payload: {payload}',
+                            'Use parameterized queries and input validation')
+            except Exception as e:
+                logger.error(f"Error checking blind SQL injection on {url}: {str(e)}")
+                
+    async def check_open_redirects(self):
+        """Check for open redirect vulnerabilities."""
+        redirect_payloads = [
+            "https://evil.com",
+            "//evil.com",
+            "/\\evil.com",
+            "https:evil.com"
+        ]
+        
+        for url in self.visited_urls:
+            parsed = urlparse(url)
+            query_params = parsed.query.split('&')
+            
+            for param in query_params:
+                if '=' in param:
+                    param_name = param.split('=')[0]
+                    for payload in redirect_payloads:
+                        test_url = url.replace(param, f"{param_name}={payload}")
+                        try:
+                            async with self.session.get(test_url, allow_redirects=False) as response:
+                                if response.status in (301, 302, 303, 307, 308):
+                                    location = response.headers.get('Location', '')
+                                    if any(evil in location for evil in ['evil.com', payload]):
+                                        self._add_vulnerability('Open Redirect', url, param_name, 'Medium',
+                                            f'Open redirect vulnerability found in {param_name} parameter',
+                                            f'Redirected to: {location}',
+                                            'Implement URL validation and whitelist of allowed domains')
+                        except Exception as e:
+                            logger.error(f"Error checking open redirect on {url}: {str(e)}")
+                            
+    async def check_csrf(self):
+        """Check for CSRF vulnerabilities."""
+        for url in self.visited_urls:
+            try:
+                async with self.session.get(url) as response:
+                    text = await response.text()
+                    soup = BeautifulSoup(text, 'html.parser')
+                    forms = soup.find_all('form', method=lambda m: m and m.lower() == 'post')
+                    
+                    for form in forms:
+                        # Check if form has CSRF token
+                        csrf_tokens = form.find_all(['input', 'meta'], attrs={
+                            'name': lambda x: x and any(token in x.lower() for token in [
+                                'csrf', 'xsrf', 'token', '_token', 'authenticity'
+                            ])
+                        })
+                        
+                        if not csrf_tokens:
+                            self._add_vulnerability('CSRF', url, 'form', 'Medium',
+                                'Form without CSRF protection',
+                                f'POST form action: {form.get("action", "")}',
+                                'Implement CSRF tokens for all state-changing operations')
+            except Exception as e:
+                logger.error(f"Error checking CSRF on {url}: {str(e)}")
+                
+    async def check_sensitive_data_exposure(self):
+        """Check for sensitive data exposure."""
+        sensitive_patterns = [
+            r'password\s*=\s*["\'][^"\']',
+            r'api[_-]?key\s*=\s*["\'][^"\']',
+            r'secret\s*=\s*["\'][^"\']',
+            r'aws[_-]?key',
+            r'aws[_-]?secret',
+            r'firebase[_-]?key',
+            r'private[_-]?key',
+            r'\b(?:[0-9]{4}[- ]?){3}[0-9]{4}\b',  # Credit card pattern
+            r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'  # Email pattern
+        ]
+        
+        for url in self.visited_urls:
+            try:
+                async with self.session.get(url) as response:
+                    text = await response.text()
+                    
+                    # Check for sensitive data in response
+                    for pattern in sensitive_patterns:
+                        matches = re.finditer(pattern, text, re.IGNORECASE)
+                        for match in matches:
+                            context = text[max(0, match.start() - 20):min(len(text), match.end() + 20)]
+                            self._add_vulnerability('Sensitive Data Exposure', url, pattern, 'High',
+                                f'Potential sensitive data found matching pattern: {pattern}',
+                                f'Context: ...{context}...',
+                                'Remove sensitive data from client-side code and responses')
+                                
+                    # Check for sensitive information in HTML comments
+                    soup = BeautifulSoup(text, 'html.parser')
+                    comments = soup.find_all(string=lambda text: isinstance(text, str) and text.strip().startswith('<!--'))
+                    
+                    for comment in comments:
+                        for pattern in sensitive_patterns:
+                            if re.search(pattern, comment, re.IGNORECASE):
+                                self._add_vulnerability('Sensitive Data in Comments', url, 'comment', 'Medium',
+                                    'Sensitive data found in HTML comment',
+                                    f'Comment contains pattern: {pattern}',
+                                    'Remove sensitive information from HTML comments')
+            except Exception as e:
+                logger.error(f"Error checking sensitive data exposure on {url}: {str(e)}")
             
     async def crawl(self, url: str, depth: int = 0):
         """Crawl the website to discover URLs."""

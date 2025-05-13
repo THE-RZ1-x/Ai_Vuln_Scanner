@@ -1,8 +1,6 @@
-# AI-Powered Vulnerability Scanner v2.0
+# AI-Powered Vulnerability Scanner (BETA+FIXED)
 
 A comprehensive security assessment tool that leverages artificial intelligence to detect vulnerabilities, misconfigurations, and security risks across networks, web applications, containers, and cloud infrastructure.
-
-![AI Vulnerability Scanner GUI](screenshot's/main%20gui%20page.png)
 
 ## Features
 
@@ -66,7 +64,7 @@ A comprehensive security assessment tool that leverages artificial intelligence 
 
 ### 6. Interactive Reporting
 - **Enhanced HTML Reports**: Beautiful, interactive HTML reports with improved visualization
-- **Multi-language Support**: Reports available in English and other languages
+- **Multi-language Support**: Reports in multiple languages including Arabic
 - **AI Analysis Section**: Dedicated sections for AI-generated security insights
 - **Visualizations**: 
   - Vulnerability severity distribution
@@ -100,81 +98,34 @@ cp .env.example .env
 
 ## Usage
 
-### GUI Interface
-
-The easiest way to use the scanner is through the graphical interface:
-
+### Basic Network Scan
 ```bash
-python run_gui.py
+python scanner.py -t target_ip -s basic
 ```
 
-This will launch the GUI interface where you can:
-- Configure scan settings
-- Run scans against various targets
-- Generate exploits for identified vulnerabilities
-- View and manage scan reports
-- Configure API keys and settings
-
-### Command Line Usage
-
-#### Basic Network Scan
+### Comprehensive Scan
 ```bash
-python ai_vuln_scanner.py -t target_ip -s basic
+python scanner.py -t target_ip -s comprehensive
 ```
 
-#### Comprehensive Scan
+### Container Security Scan
 ```bash
-python ai_vuln_scanner.py -t target_ip -s comprehensive
-```
-
-#### Container Security Scan
-```bash
-python ai_vuln_scanner.py -t image_name -s container
+python scanner.py -t image_name -s container
 # or
-python ai_vuln_scanner.py -t image_name --container
+python scanner.py -t image_name --container
 ```
 
-#### Cloud Infrastructure Scan
+### Cloud Infrastructure Scan
 ```bash
 # Scan all configured cloud providers
-python ai_vuln_scanner.py -t cloud -s cloud
+python scanner.py -t cloud -s cloud
 
 # Scan specific providers
-python ai_vuln_scanner.py -t cloud -s cloud --cloud-providers aws azure
+python scanner.py -t cloud -s cloud --cloud-providers aws azure
 
 # Scan single provider
-python ai_vuln_scanner.py -t aws -s cloud
+python scanner.py -t aws -s cloud
 ```
-
-## Project Structure
-
-The project is organized into the following directories:
-
-- `src/`: Core Python modules
-  - `scanner.py`: Main scanning engine
-  - `web_scanner.py`: Web application scanning module
-  - `cloud_scanner.py`: Cloud infrastructure scanning module
-  - `container_scanner.py`: Container scanning module
-  - `exploit_generator.py`: Exploit generation module
-  - `report_generator.py`: Report generation module
-  - `gui_scanner.py`: GUI interface module
-- `utils/`: Utility scripts
-  - `dependency_checker.py`: Checks and installs required dependencies
-  - `test_exploit_gen.py`: Test exploit generation utility
-- `docs/`: Documentation
-- `scans/`: Output directory for scan results
-
-## Dependency Management
-
-The scanner includes automatic dependency management to ensure all required packages are installed:
-
-1. **Automatic Checking**: The scanner checks for required dependencies on startup
-2. **Interactive Installation**: Missing dependencies can be installed with a single click
-3. **Graceful Degradation**: The scanner will function with reduced capabilities if optional dependencies are missing
-4. **Manual Installation**: Dependencies can be installed manually with:
-   ```bash
-   python utils/dependency_checker.py --install
-   ```
 
 ## API Key Configuration
 
@@ -230,7 +181,7 @@ If reports display incorrectly:
 ### Command Line Options
 
 ```bash
-python ai_vuln_scanner.py [-h] -t TARGET [-s {basic,comprehensive,container,cloud}] [-v] [-o OUTPUT] [--container] [--cloud-providers {aws,azure,gcp} [{aws,azure,gcp} ...]] [--gui]
+python scanner.py [-h] -t TARGET [-s {basic,comprehensive,container,cloud}] [-v] [-o OUTPUT] [--container] [--cloud-providers {aws,azure,gcp} [{aws,azure,gcp} ...]]
 ```
 
 #### Required Arguments:
@@ -248,43 +199,105 @@ python ai_vuln_scanner.py [-h] -t TARGET [-s {basic,comprehensive,container,clou
 - `-v, --verbose`: Enable detailed output for debugging
 - `-o, --output`: Specify custom output file name (without extension)
 - `--container`: Flag to treat target as a container image
-- `--cloud-providers`: Specify which cloud providers to scan (when using cloud scan type)
-- `--gui`: Launch the graphical user interface
+- `--cloud-providers`: Specify which cloud providers to scan (requires `-s cloud`)
 
-## What's New in v2.0
+### Examples by Feature
 
-### 1. Improved Project Structure
-- Organized codebase into logical directories (src, utils, docs)
-- Cleaner file organization for better maintainability
-- Standardized module interfaces
+#### 1. Network Security Scanning
 
-### 2. Enhanced GUI
-- Modern cybersecurity-themed interface
-- Improved threading for better responsiveness
-- Added About dialog with license and author information
+```bash
+# Basic network scan of a single host
+python scanner.py -t 192.168.1.1 -s basic
 
-### 3. Dependency Management
-- Automatic dependency checking and installation
-- Better handling of missing dependencies
-- Support for both required and optional packages
+# Comprehensive scan with verbose output
+python scanner.py -t example.com -s comprehensive -v
 
-### 4. Report Improvements
-- Multi-language support (English and others)
-- Better visualization with interactive charts
-- Improved template selection based on system capabilities
+# Save scan results to custom file
+python scanner.py -t 192.168.1.1 -s basic -o my_scan_report
+```
 
-### 5. Launcher Scripts
-- Added convenient launcher scripts (run_gui.py, run_gui.bat)
-- Unified command-line interface through ai_vuln_scanner.py
-- Better error handling and user feedback
+#### 2. Web Application Security
+
+```bash
+# Scan a web application
+python scanner.py -t http://example.com -s comprehensive
+
+# Scan with specific focus on web vulnerabilities
+python scanner.py -t https://example.com -s comprehensive
+```
+
+#### 3. Container Security
+
+```bash
+# Scan a specific container image
+python scanner.py -t nginx:latest -s container
+
+# Alternative container scan syntax
+python scanner.py -t ubuntu:20.04 --container
+
+# Scan container with verbose output
+python scanner.py -t mysql:8.0 -s container -v
+```
+
+#### 4. Cloud Infrastructure Security
+
+```bash
+# Scan all configured cloud providers
+python scanner.py -t cloud -s cloud
+
+# Scan specific cloud providers
+python scanner.py -t cloud -s cloud --cloud-providers aws azure
+
+# Scan single cloud provider
+python scanner.py -t aws -s cloud
+
+# Comprehensive cloud scan with custom report
+python scanner.py -t cloud -s cloud --cloud-providers aws azure gcp -o cloud_security_report
+```
+
+### Understanding Scan Results
+
+The scanner generates reports in multiple formats:
+
+1. **Interactive HTML Report** (default)
+   - Located in `scans/` directory
+   - Contains:
+     - Executive summary
+     - Vulnerability details
+     - Risk scores
+     - Interactive charts
+     - AI-powered analysis
+     - Remediation recommendations
+
+2. **JSON Report**
+   - Located in `scans/` directory with `.json` extension
+   - Useful for programmatic analysis
+   - Contains raw scan data
+
+## Recent Improvements
+
+Recent updates include:
+
+1. **Enhanced AI Analysis Display**:
+   - Fixed issues with OpenAI analysis display in reports
+   - Improved formatting of AI analysis text 
+   - Added proper styling for analysis sections
+
+2. **Report Resilience**:
+   - Better handling of missing dependencies
+   - Improved fallback mechanisms for visualization
+   - Enhanced template selection based on system capabilities
+
+3. **Error Handling**:
+   - Better messaging for API quota limitations
+   - Clear indications when AI services are unavailable
+   - Graceful degradation when services fail
+
+4. **Visualization Enhancements**:
+   - Improved chart rendering
+   - Better mobile responsiveness
+   - Enhanced dashboard elements
 
 ## License
 
-This project is licensed under the GNU General Public License v3.0 - see the LICENSE file for details.
-
-## Author
-
-**RHAZOUANE SALAH-EDDINE**
-
-- GitHub: [https://github.com/THE-RZ1-x](https://github.com/THE-RZ1-x)
-- Repository: [https://github.com/THE-RZ1-x/Ai_Vuln_Scanner](https://github.com/THE-RZ1-x/Ai_Vuln_Scanner)
+Copyright © 2025 RHAZOUANE SALAH-EDDINE

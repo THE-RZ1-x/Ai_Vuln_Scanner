@@ -1,0 +1,68 @@
+AI Vulnerability Scanner v2.0 - Cleanup Plan
+
+FILES TO KEEP:
+--------------
+1. Core Scanner Files:
+   - scanner.py (Main scanner module)
+   - web_scanner.py (Web scanning module)
+   - cloud_scanner.py (Cloud scanning module)
+   - container_scanner.py (Container scanning module)
+   - exploit_generator.py (Exploit generation module)
+   - report_generator.py (Report generation module)
+
+2. GUI Files:
+   - gui_scanner.py (Main GUI application)
+   - run_gui.bat (Launcher script)
+
+3. Templates:
+   - templates/advanced_report.html (Main report template)
+   - templates/standard_report.html (Standard report template)
+   - templates/basic_report.html (Basic report template)
+
+4. Documentation:
+   - README.md (Project documentation)
+   - LICENSE (License file)
+   - requirements.txt (Dependencies)
+
+5. Utility Files:
+   - test_exploit_gen.py (Mock exploit generator for testing)
+
+FILES TO REMOVE:
+---------------
+1. Backup Files:
+   - report_generator.bak.py
+   - report_generator_backup.py
+   - report_generator_broken.py
+   - templates/advanced_report.bak.html
+
+2. Test Files:
+   - test.py
+   - test_mcp_browser.py
+   - test_openai.py
+   - check_env.py
+   - fix_indent.py
+
+3. Generated Reports:
+   - AI_Vulnerability_Scanner_Project_Report.docx (Can be regenerated)
+   - AI_Vulnerability_Scanner_Project_Report.html (Can be regenerated)
+   - project_report.md (Content already in README.md)
+
+4. Temporary Files:
+   - setup_env.ps1 (No longer needed after environment setup)
+   - templates/report.html (Duplicate template)
+   - templates/report_template.html (Duplicate template)
+   - templates/minimal_report.html (Not used)
+
+ORGANIZATION PLAN:
+-----------------
+1. Create organized directory structure:
+   - src/ (Source code)
+   - templates/ (Report templates)
+   - docs/ (Documentation)
+   - utils/ (Utility scripts)
+
+2. Update imports and paths in code to reflect new structure
+
+3. Create comprehensive README.md with installation and usage instructions
+
+4. Update version numbers in all files to 2.0

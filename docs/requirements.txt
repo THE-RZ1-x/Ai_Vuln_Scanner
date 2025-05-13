@@ -16,7 +16,7 @@ pandas>=2.1.0
 numpy>=1.24.0
 
 # AI models
-google-generativeai>=0.3.0  # Gemini API
+google-generativeai>=0.6.0  # Gemini API
 openai>=1.0.0  # OpenAI API
 torch>=2.1.0  # For local ML models
 transformers>=4.36.0  # For local ML models
@@ -32,6 +32,10 @@ cvss>=2.6  # CVSS scoring
 plotly>=5.18.0  # Interactive charts
 kaleido>=0.2.1  # For static image export
 tailwindcss>=3.4.0  # For report styling
+matplotlib>=3.8.0  # Static charts (fallback for Plotly)
+networkx>=3.2.1  # Network visualization
+fontawesome-free>=5.15.4  # Icons for reports
+bootstrap>=5.3.0  # UI components for reports
 
 # Container scanning
 docker>=7.0.0  # Docker API

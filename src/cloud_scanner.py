@@ -1,24 +1,63 @@
 #!/usr/bin/env python3
 """
-Cloud Infrastructure Security Scanner Module
-Part of AI-Powered Vulnerability Scanner
-Supports AWS, Azure, and GCP
+Cloud Infrastructure Vulnerability Scanner
+Copyright (c) 2025 RHAZOUANE SALAH-EDDINE
+All rights reserved.
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+PROPRIETARY NOTICE:
+This software is the confidential and proprietary information of
+RHAZOUANE SALAH-EDDINE. You shall not disclose such confidential
+information and shall use it only in accordance with the terms
+of the license agreement you entered into with RHAZOUANE SALAH-EDDINE.
+
+Author: RHAZOUANE SALAH-EDDINE
+Repository: https://github.com/THE-RZ1-x/Ai_Vuln_Scanner
+Profile: https://github.com/THE-RZ1-x
+Version: 2.0
 """
 
 import os
 import json
 import logging
 import asyncio
-from typing import Dict, List, Optional, Union
+from datetime import datetime
+from typing import Dict, List, Optional, Union, Any
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
+
+# AWS imports
 import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+
+# Azure imports
 from azure.identity import DefaultAzureCredential
 from azure.mgmt.security import SecurityCenter
 from azure.mgmt.subscription import SubscriptionClient
+from azure.mgmt.resource import ResourceManagementClient
+from azure.core.exceptions import AzureError
+
+# GCP imports
 from google.cloud.securitycenter_v1 import SecurityCenterClient
-from google.cloud.asset_v1 import AssetServiceClient
+from google.cloud.asset_v1 import AssetServiceClient, ListAssetsRequest
+from google.api_core.exceptions import GoogleAPIError
+
 from concurrent.futures import ThreadPoolExecutor
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -28,8 +67,8 @@ class CloudResource:
     resource_id: str
     name: str
     region: str
-    tags: Dict
-    configuration: Dict
+    tags: Dict[str, str]
+    configuration: Dict[str, Any]
 
 @dataclass
 class CloudVulnerability:
@@ -46,11 +85,11 @@ class CloudScanResult:
     provider: str
     resources: List[CloudResource]
     vulnerabilities: List[CloudVulnerability]
-    misconfigurations: List[Dict]
-    compliance_status: Dict
-    iam_issues: List[Dict]
-    network_findings: List[Dict]
-    encryption_status: Dict
+    misconfigurations: List[Dict[str, Any]]
+    compliance_status: Dict[str, Any]
+    iam_issues: List[Dict[str, Any]]
+    network_findings: List[Dict[str, Any]]
+    encryption_status: Dict[str, Any]
     scan_timestamp: str
 
 class CloudScanner:
@@ -61,14 +100,14 @@ class CloudScanner:
         self.gcp_enabled = False
         self.initialize_clients()
         
-    def initialize_clients(self):
+    def initialize_clients(self) -> None:
         """Initialize cloud provider clients."""
         try:
             # AWS
             self.aws_session = boto3.Session()
             self.aws_enabled = True
             logger.info("AWS client initialized successfully")
-        except Exception as e:
+        except (BotoCoreError, ClientError) as e:
             logger.warning(f"Failed to initialize AWS client: {str(e)}")
             
         try:
@@ -77,7 +116,7 @@ class CloudScanner:
             self.subscription_client = SubscriptionClient(self.azure_credential)
             self.azure_enabled = True
             logger.info("Azure client initialized successfully")
-        except Exception as e:
+        except AzureError as e:
             logger.warning(f"Failed to initialize Azure client: {str(e)}")
             
         try:
@@ -86,10 +125,10 @@ class CloudScanner:
             self.gcp_asset_client = AssetServiceClient()
             self.gcp_enabled = True
             logger.info("GCP client initialized successfully")
-        except Exception as e:
+        except GoogleAPIError as e:
             logger.warning(f"Failed to initialize GCP client: {str(e)}")
             
-    async def scan_cloud_infrastructure(self, providers: List[str] = None) -> Dict[str, CloudScanResult]:
+    async def scan_cloud_infrastructure(self, providers: Optional[List[str]] = None) -> Dict[str, CloudScanResult]:
         """
         Scan cloud infrastructure across specified providers.
         Args:
@@ -308,7 +347,7 @@ class CloudScanner:
         resources = []
         regions = self.aws_session.get_available_regions('ec2')
         
-        async def scan_region(region):
+        async def scan_region(region: str) -> None:
             try:
                 resource = boto3.resource('ec2', region_name=region)
                 instances = list(resource.instances.all())
@@ -321,7 +360,7 @@ class CloudScanner:
                         name=next((tag['Value'] for tag in instance.tags or [] 
                                  if tag['Key'] == 'Name'), ''),
                         region=region,
-                        tags=instance.tags or {},
+                        tags=dict((tag['Key'], tag['Value']) for tag in instance.tags or []),
                         configuration={
                             'state': instance.state['Name'],
                             'type': instance.instance_type,
@@ -330,7 +369,7 @@ class CloudScanner:
                             'security_groups': [sg['GroupId'] for sg in instance.security_groups]
                         }
                     ))
-            except Exception as e:
+            except (BotoCoreError, ClientError) as e:
                 logger.error(f"Error scanning AWS region {region}: {str(e)}")
                 
         await asyncio.gather(*[scan_region(region) for region in regions])
@@ -339,21 +378,22 @@ class CloudScanner:
     # Azure Helper Methods
     async def _get_azure_resources(self, subscription_id: str) -> List[CloudResource]:
         """Get Azure resources for a subscription."""
-        from azure.mgmt.resource import ResourceManagementClient
-        
         resources = []
-        resource_client = ResourceManagementClient(self.azure_credential, subscription_id)
-        
-        for resource in resource_client.resources.list():
-            resources.append(CloudResource(
-                provider='azure',
-                resource_type=resource.type,
-                resource_id=resource.id,
-                name=resource.name,
-                region=resource.location,
-                tags=resource.tags or {},
-                configuration=resource.as_dict()
-            ))
+        try:
+            resource_client = ResourceManagementClient(self.azure_credential, subscription_id)
+            
+            for resource in resource_client.resources.list():
+                resources.append(CloudResource(
+                    provider='azure',
+                    resource_type=resource.type,
+                    resource_id=resource.id,
+                    name=resource.name,
+                    region=resource.location,
+                    tags=resource.tags or {},
+                    configuration=resource.as_dict()
+                ))
+        except AzureError as e:
+            logger.error(f"Error getting Azure resources: {str(e)}")
             
         return resources
         
@@ -362,25 +402,26 @@ class CloudScanner:
         """Get GCP resources for an organization."""
         resources = []
         
-        # Create asset feed request
-        request = asset_v1.ListAssetsRequest(
-            parent=org_path,
-            asset_types=['compute.googleapis.com/Instance']
-        )
-        
         try:
+            # Create asset feed request
+            request = ListAssetsRequest(
+                parent=org_path,
+                asset_types=['compute.googleapis.com/Instance']
+            )
+            
             # List all assets
             for asset in self.gcp_asset_client.list_assets(request):
+                resource_data = asset.asset.resource.data
                 resources.append(CloudResource(
                     provider='gcp',
                     resource_type=asset.asset_type,
                     resource_id=asset.name,
-                    name=asset.display_name,
-                    region=asset.location,
-                    tags=asset.resource.data.get('labels', {}),
-                    configuration=asset.resource.data
+                    name=resource_data.get('name', ''),
+                    region=resource_data.get('zone', '').rsplit('/', 1)[-1],
+                    tags=resource_data.get('labels', {}),
+                    configuration=resource_data
                 ))
-        except Exception as e:
+        except GoogleAPIError as e:
             logger.error(f"Error getting GCP resources: {str(e)}")
             
         return resources
@@ -417,3 +458,37 @@ class CloudScanner:
         """Get AWS compliance status."""
         # Implementation here
         return {}
+
+    async def __aenter__(self):
+        """Async context manager entry."""
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit with proper cleanup."""
+        # Cleanup AWS resources
+        if self.aws_enabled:
+            try:
+                if hasattr(self, 'aws_session'):
+                    # Close any open boto3 sessions
+                    self.aws_session.close()
+            except Exception as e:
+                logger.warning(f"Error cleaning up AWS resources: {str(e)}")
+        
+        # Cleanup Azure resources
+        if self.azure_enabled:
+            try:
+                if hasattr(self, 'azure_credential'):
+                    # Close Azure credential if needed
+                    await self.azure_credential.close()
+            except Exception as e:
+                logger.warning(f"Error cleaning up Azure resources: {str(e)}")
+        
+        # Cleanup GCP resources
+        if self.gcp_enabled:
+            try:
+                if hasattr(self, 'gcp_security_client'):
+                    await self.gcp_security_client.close()
+                if hasattr(self, 'gcp_asset_client'):
+                    await self.gcp_asset_client.close()
+            except Exception as e:
+                logger.warning(f"Error cleaning up GCP resources: {str(e)}")
